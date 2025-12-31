@@ -1154,14 +1154,17 @@ print("[CombatClient] Initialized!")
 						<ProtectedString name="Source"><![CDATA[--[[
 	CombatClient.lua
 	Main client combat controller
+	REFACTORED: Added aerial combat state handling
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 
 local CombatFolder = ReplicatedStorage:WaitForChild("Combat")
 local State = require(CombatFolder.Modules.StateManager)
 local Cooldown = require(CombatFolder.Modules.CooldownManager)
+local Config = require(CombatFolder.Config)
 
 local Player = Players.LocalPlayer
 
@@ -1172,170 +1175,232 @@ local InputHandler = nil
 local AnimHandler = nil
 local VFXHandler = nil
 
+-- Track local aerial state
+local LocalAerialState = {
+	isAirborne = false,
+	airHits = 0,
+}
+
 function CombatClient.Init()
-    -- Get remotes
-    local folder = ReplicatedStorage:WaitForChild("Remotes")
-    Remotes = {
-        Attack = folder:WaitForChild("Attack"),
-        Uptilt = folder:WaitForChild("Uptilt"),
-        Block = folder:WaitForChild("Block"),
-        Dash = folder:WaitForChild("Dash"),
-        Hit = folder:WaitForChild("Hit"),
-        State = folder:WaitForChild("State"),
-        Ability = folder:WaitForChild("Ability"),
-        Notification = folder:WaitForChild("Notification"),
-    }
+	-- Get remotes
+	local folder = ReplicatedStorage:WaitForChild("Remotes")
+	Remotes = {
+		Attack = folder:WaitForChild("Attack"),
+		Uptilt = folder:WaitForChild("Uptilt"),
+		Block = folder:WaitForChild("Block"),
+		Dash = folder:WaitForChild("Dash"),
+		Hit = folder:WaitForChild("Hit"),
+		State = folder:WaitForChild("State"),
+		Ability = folder:WaitForChild("Ability"),
+		Notification = folder:WaitForChild("Notification"),
+	}
 
-    -- Setup local state
-    State.Setup(Player)
+	-- Setup local state
+	State.Setup(Player)
 
-    -- Load handlers
-    InputHandler = require(script.Parent.Handlers.InputHandler)
-    AnimHandler = require(script.Parent.Handlers.AnimationHandler)
-    VFXHandler = require(script.Parent.Handlers.VFXHandler)
+	-- Load handlers
+	InputHandler = require(script.Parent.Handlers.InputHandler)
+	AnimHandler = require(script.Parent.Handlers.AnimationHandler)
+	VFXHandler = require(script.Parent.Handlers.VFXHandler)
 
-    InputHandler.Init(Remotes)
-    AnimHandler.Init()
-    VFXHandler.Init()
+	InputHandler.Init(Remotes)
+	AnimHandler.Init()
+	VFXHandler.Init()
 
-    -- Listen for events
-    Remotes.State.OnClientEvent:Connect(CombatClient.OnState)
-    Remotes.Hit.OnClientEvent:Connect(CombatClient.OnHit)
-    Remotes.Notification.OnClientEvent:Connect(CombatClient.OnNotification)
+	-- Listen for events
+	Remotes.State.OnClientEvent:Connect(CombatClient.OnState)
+	Remotes.Hit.OnClientEvent:Connect(CombatClient.OnHit)
+	Remotes.Notification.OnClientEvent:Connect(CombatClient.OnNotification)
 
-    print("[CombatClient] Initialized")
-    return CombatClient
+	print("[CombatClient] Initialized with aerial support")
+	return CombatClient
 end
 
 function CombatClient.OnState(player, stateType, data, extra)
-    local char = player.Character
-    if not char then return end
+	local char = player.Character
+	if not char then return end
 
-    local isLocal = player == Player
+	local isLocal = player == Player
 
-    if stateType == "M1" then
-        local combo = data
-        local info = extra or {}
-        VFXHandler.ScreenFlash(Color3.fromHSV(0.916667, 0.082475, 0.380392), .1)
+	if stateType == "M1" then
+		local combo = data
+		local info = extra or {}
+		VFXHandler.ScreenFlash(Color3.fromHSV(0.916667, 0.082475, 0.380392), .1)
 
-        -- Play animation
-        if isLocal then
-            AnimHandler.PlayM1(char, combo)
-        else
-            AnimHandler.PlayOn(char, "M1_" .. combo, { fadeIn = 0.05, priority = Enum.AnimationPriority.Action2 })
-        end
+		if isLocal then
+			AnimHandler.PlayM1(char, combo)
+		else
+			AnimHandler.PlayOn(char, "M1_" .. combo, { fadeIn = 0.05, priority = Enum.AnimationPriority.Action2 })
+		end
 
-        -- VFX
-        VFXHandler.OnM1(player, combo, info)
+		VFXHandler.OnM1(player, combo, info)
 
-    elseif stateType == "Uptilt" then
-        local info = data or {}
+	elseif stateType == "Uptilt" then
+		local info = data or {}
 
-        if isLocal then
-            AnimHandler.PlayUptilt(char)
-        else
-            AnimHandler.PlayOn(char, "Uptilt", { fadeIn = 0.05, priority = Enum.AnimationPriority.Action2 })
-        end
+		-- Track airborne state
+		if isLocal then
+			LocalAerialState.isAirborne = true
+			LocalAerialState.airHits = 0
+			AnimHandler.PlayUptilt(char)
+		else
+			AnimHandler.PlayOn(char, "Uptilt", { fadeIn = 0.03, priority = Enum.AnimationPriority.Action3 })
+		end
 
-        VFXHandler.OnUptilt(player, info)
+		VFXHandler.OnUptilt(player, info)
 
-    elseif stateType == "Dash" then
-        local info = data or {}
+	elseif stateType == "AerialM1" then
+		local info = data or {}
+		local airHit = info.airHit or 1
 
-        -- info.intent is authoritative ("Forward", "Back", "Left", "Right")
-        local intent = info.intent or "Forward"
+		if isLocal then
+			LocalAerialState.airHits = airHit
+			AnimHandler.PlayAerialM1(char, airHit)
+		else
+			AnimHandler.PlayOn(char, "AerialM1_" .. airHit, { fadeIn = 0.03, priority = Enum.AnimationPriority.Action3 })
+		end
 
-        -- Play dash animation for BOTH local and others
-        AnimHandler.PlayDash(char, intent)
+		VFXHandler.OnAerialM1(player, info)
 
-        task.delay(0.03, function()
-            if char and char.Parent then
-                VFXHandler.OnDash(char, intent, info)
-            end
-        end)
- 
-    elseif stateType == "BlockStart" then
-        local info = data or {}
+	elseif stateType == "Downslam" then
+		local info = data or {}
 
-        if isLocal then
-            AnimHandler.PlayBlock(char)
-        else
-            AnimHandler.PlayOn(char, "BlockIdle", { fadeIn = 0.08, looped = true })
-        end
+		if isLocal then
+			AnimHandler.PlayDownslam(char)
+		else
+			AnimHandler.PlayOn(char, "Downslam", { fadeIn = 0.03, priority = Enum.AnimationPriority.Action3 })
+		end
 
-        VFXHandler.OnBlockStart(char, info)
+		VFXHandler.OnDownslam(player, info)
 
-    elseif stateType == "BlockEnd" then
-        if isLocal then
-            AnimHandler.Stop(char, "BlockIdle")
-        end
+	elseif stateType == "AirKnockback" then
+		local info = data or {}
 
-        VFXHandler.OnBlockEnd(char, data)
+		if isLocal then
+			AnimHandler.PlayAirKnockback(char)
+		else
+			AnimHandler.PlayOn(char, "AirKnockback", { fadeIn = 0.03, priority = Enum.AnimationPriority.Action3 })
+		end
 
-    elseif stateType == "CharacterSelect" then
-        local characterName = data
+		VFXHandler.OnAirKnockback(player, info)
 
-        if isLocal then
-            -- Reload animations for new character
-            Cooldown.ResetAll(Player)
-            AnimHandler.LoadCharacterAnims(char, characterName)
-            VFXHandler.SetCharacter(characterName)
-        end
+	elseif stateType == "GroundImpact" then
+		local info = data or {}
 
-    elseif stateType == "Ability" then
-        local abilityName = data
-        local info = extra or {}
+		if isLocal then
+			LocalAerialState.isAirborne = false
+			LocalAerialState.airHits = 0
+		end
 
-        if isLocal then
-            AnimHandler.PlayAbility(char, abilityName)
-        else
-            AnimHandler.PlayOn(char, abilityName, { fadeIn = 0.05, priority = Enum.AnimationPriority.Action2 })
-        end
+		VFXHandler.OnGroundImpact(player, info)
 
-        VFXHandler.OnAbility(player, abilityName, info)
+	elseif stateType == "Dash" then
+		local info = data or {}
+		local intent = info.intent or "Forward"
 
-    elseif stateType == "Passive" then
-        if isLocal then
-            CombatClient.OnPassive(data, extra)
-        end
+		AnimHandler.PlayDash(char, intent)
 
-    elseif stateType == "PassiveVFX" then
-        VFXHandler.OnPassiveVFX(char, data, extra)
-    end
+		task.delay(0.03, function()
+			if char and char.Parent then
+				VFXHandler.OnDash(char, intent, info)
+			end
+		end)
+
+	elseif stateType == "BlockStart" then
+		local info = data or {}
+
+		if isLocal then
+			AnimHandler.PlayBlock(char)
+		else
+			AnimHandler.PlayOn(char, "BlockIdle", { fadeIn = 0.08, looped = true })
+		end
+
+		VFXHandler.OnBlockStart(char, info)
+
+	elseif stateType == "BlockEnd" then
+		if isLocal then
+			AnimHandler.Stop(char, "BlockIdle")
+		end
+
+		VFXHandler.OnBlockEnd(char, data)
+
+	elseif stateType == "CharacterSelect" then
+		local characterName = data
+
+		if isLocal then
+			Cooldown.ResetAll(Player)
+			AnimHandler.LoadCharacterAnims(char, characterName)
+			VFXHandler.SetCharacter(characterName)
+		end
+
+	elseif stateType == "Ability" then
+		local abilityName = data
+		local info = extra or {}
+
+		if isLocal then
+			AnimHandler.PlayAbility(char, abilityName)
+		else
+			AnimHandler.PlayOn(char, abilityName, { fadeIn = 0.05, priority = Enum.AnimationPriority.Action2 })
+		end
+
+		VFXHandler.OnAbility(player, abilityName, info)
+
+	elseif stateType == "Passive" then
+		if isLocal then
+			CombatClient.OnPassive(data, extra)
+		end
+
+	elseif stateType == "PassiveVFX" then
+		VFXHandler.OnPassiveVFX(char, data, extra)
+	end
 end
 
 function CombatClient.OnHit(hitData)
-    -- Play hit reaction on victim
-    local victimChar = hitData.victimChar
-    if victimChar and not hitData.blocked then
-        local isLocal = hitData.victim == Player
+	local victimChar = hitData.victimChar
+	if victimChar and not hitData.blocked then
+		local isLocal = hitData.victim == Player
+		local hitType = hitData.hitType
 
-        if isLocal then
-            AnimHandler.PlayHitReaction(victimChar, hitData.hitType)
-        else
-            local animName = "HitLight"
-            if hitData.hitType == "Final" then animName = "HitHeavy"
-            elseif hitData.hitType == "Uptilt" then animName = "HitLaunch"
-            end
-            AnimHandler.PlayOn(victimChar, animName, { fadeIn = 0.02, priority = Enum.AnimationPriority.Action4 })
-        end
-    end
+		if isLocal then
+			AnimHandler.PlayHitReaction(victimChar, hitType)
+		else
+			local animName = "HitLight"
+			if hitType == "Final" then
+				animName = "HitHeavy"
+			elseif hitType == "Uptilt" then
+				animName = "HitLaunch"
+			elseif hitType == "Aerial" then
+				animName = "HitAerial"
+			elseif hitType == "Downslam" then
+				animName = "HitSlam"
+			elseif hitType == "AirKnockback" then
+				animName = "HitKnockback"
+			end
+			AnimHandler.PlayOn(victimChar, animName, { fadeIn = 0.02, priority = Enum.AnimationPriority.Action4 })
+		end
+	end
 
-    -- VFX
-    VFXHandler.OnHit(hitData)
+	VFXHandler.OnHit(hitData)
 end
 
 function CombatClient.OnPassive(eventType, data)
-    print("[Passive]", eventType, data)
+	print("[Passive]", eventType, data)
 end
 
 function CombatClient.OnNotification(message)
-    print("[Notification]", message)
-    -- TODO: Show UI notification
+	print("[Notification]", message)
 end
 
 function CombatClient.GetRemotes()
-    return Remotes
+	return Remotes
+end
+
+function CombatClient.IsAirborne()
+	return LocalAerialState.isAirborne
+end
+
+function CombatClient.GetAirHits()
+	return LocalAerialState.airHits
 end
 
 return CombatClient]]></ProtectedString>
@@ -1365,13 +1430,15 @@ return CombatClient]]></ProtectedString>
 						<Properties>
 							<Content name="LinkedSource"><null></null></Content>
 							<ProtectedString name="Source"><![CDATA[--[[
-    InputHandler.lua
-    Handles player input
+	InputHandler.lua
+	Handles player input - REFACTORED with aerial support
+	Location: StarterPlayerScripts/Combat/Client/InputHandler
 ]]
 
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local Player = Players.LocalPlayer
 
@@ -1382,104 +1449,180 @@ local AnimationHandler = require(script.Parent.AnimationHandler)
 local InputHandler = {}
 
 local Remotes = nil
+local AerialRemote = nil
 local LockOnModule = nil
 
+-- Input state tracking
+local IsAirborne = false
+local SpacebarHeld = false
+local LastSpacebarUpdate = 0
+
 local Keybinds = {
-    Attack = Enum.UserInputType.MouseButton1,
-    Block = Enum.KeyCode.F,
-    Dash = Enum.KeyCode.Q,
-    Uptilt = Enum.KeyCode.Space,
-    Ability1 = Enum.KeyCode.One,
-    Ability2 = Enum.KeyCode.Two,
-    Ability3 = Enum.KeyCode.Three,
-    Ability4 = Enum.KeyCode.Four,
+	Attack = Enum.UserInputType.MouseButton1,
+	Block = Enum.KeyCode.F,
+	Dash = Enum.KeyCode.Q,
+	Uptilt = Enum.KeyCode.Space,
+	Ability1 = Enum.KeyCode.One,
+	Ability2 = Enum.KeyCode.Two,
+	Ability3 = Enum.KeyCode.Three,
+	Ability4 = Enum.KeyCode.Four,
 }
 
 function InputHandler.Init(remotes)
-    Remotes = remotes
+	Remotes = remotes
 
-    -- RESTORE LOCK-ON INIT (you lost this)
-    LockOnModule = require(script.Parent.Parent.Modules.LockOn)
-    LockOnModule.Init()
+	-- Get or wait for aerial remote
+	local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes")
+	AerialRemote = RemotesFolder:WaitForChild("AerialInput", 5)
 
-    -- Keep anim handler init (used by other inputs like block)
-    AnimationHandler.Init()
+	-- RESTORE LOCK-ON INIT
+	LockOnModule = require(script.Parent.Parent.Modules.LockOn)
+	LockOnModule.Init()
 
-    UserInputService.InputBegan:Connect(InputHandler.OnInputBegan)
-    UserInputService.InputEnded:Connect(InputHandler.OnInputEnded)
+	-- Keep anim handler init
+	AnimationHandler.Init()
 
-    print("[InputHandler] Initialized")
-    return InputHandler
+	UserInputService.InputBegan:Connect(InputHandler.OnInputBegan)
+	UserInputService.InputEnded:Connect(InputHandler.OnInputEnded)
+
+	-- Listen for state changes to track airborne status
+	Remotes.State.OnClientEvent:Connect(function(player, state, data)
+		if player == Player then
+			InputHandler.OnStateChange(state, data)
+		end
+	end)
+
+	-- Continuously send spacebar state when airborne
+	RunService.Heartbeat:Connect(function()
+		if IsAirborne and AerialRemote then
+			local now = tick()
+			-- Update every 0.1 seconds
+			if now - LastSpacebarUpdate > 0.1 then
+				local isHeld = UserInputService:IsKeyDown(Enum.KeyCode.Space)
+				if isHeld ~= SpacebarHeld then
+					SpacebarHeld = isHeld
+					AerialRemote:FireServer("SpacebarState", SpacebarHeld)
+				end
+				LastSpacebarUpdate = now
+			end
+		end
+	end)
+
+	print("[InputHandler] Initialized with aerial support")
+	return InputHandler
+end
+
+function InputHandler.OnStateChange(state, data)
+	-- Track airborne state
+	if state == "Uptilt" or state == "AerialM1" or state == "Airborne" then
+		IsAirborne = true
+		-- Immediately send current spacebar state
+		if AerialRemote then
+			SpacebarHeld = UserInputService:IsKeyDown(Enum.KeyCode.Space)
+			AerialRemote:FireServer("SpacebarState", SpacebarHeld)
+		end
+	elseif state == "GroundImpact" or state == "Idle" or state == "Downslam" or state == "AirKnockback" then
+		IsAirborne = false
+	end
 end
 
 function InputHandler.OnInputBegan(input, gameProcessed)
-    if gameProcessed then return end
+	if gameProcessed then return end
 
-    if input.UserInputType == Keybinds.Attack then
-        Remotes.Attack:FireServer()
+	if input.UserInputType == Keybinds.Attack then
+		if IsAirborne and AerialRemote then
+			-- Send aerial attack input
+			AerialRemote:FireServer("Attack")
+		else
+			-- Normal ground attack
+			Remotes.Attack:FireServer()
+		end
 
-    elseif input.KeyCode == Keybinds.Block then
-        AnimationHandler.Play("BlockIdle")
-        Remotes.Block:FireServer(true)
+	elseif input.KeyCode == Keybinds.Block then
+		if not IsAirborne then
+			AnimationHandler.Play("BlockIdle")
+			Remotes.Block:FireServer(true)
+		end
 
-    elseif input.KeyCode == Keybinds.Dash then
-        -- IMPORTANT: do NOT play dash animation here.
-        -- Server confirms dash via Remotes.State -> CombatClient.OnState("Dash")
-        local moveDir = InputHandler.GetMoveDirection()
-        Remotes.Dash:FireServer(moveDir)
+	elseif input.KeyCode == Keybinds.Dash then
+		local moveDir = InputHandler.GetMoveDirection()
+		Remotes.Dash:FireServer(moveDir)
 
-    elseif input.KeyCode == Keybinds.Uptilt then
-        Remotes.Uptilt:FireServer()
+	elseif input.KeyCode == Keybinds.Uptilt then
+		if not IsAirborne then
+			Remotes.Uptilt:FireServer()
+		end
+		-- Track spacebar state for aerial finisher
+		SpacebarHeld = true
+		if AerialRemote then
+			AerialRemote:FireServer("SpacebarState", true)
+		end
 
-    elseif input.KeyCode == Keybinds.Ability1 then
-        Remotes.Ability:FireServer(1)
+	elseif input.KeyCode == Keybinds.Ability1 then
+		Remotes.Ability:FireServer(1)
 
-    elseif input.KeyCode == Keybinds.Ability2 then
-        Remotes.Ability:FireServer(2)
+	elseif input.KeyCode == Keybinds.Ability2 then
+		Remotes.Ability:FireServer(2)
 
-    elseif input.KeyCode == Keybinds.Ability3 then
-        Remotes.Ability:FireServer(3)
+	elseif input.KeyCode == Keybinds.Ability3 then
+		Remotes.Ability:FireServer(3)
 
-    elseif input.KeyCode == Keybinds.Ability4 then
-        Remotes.Ability:FireServer(4)
-    end
+	elseif input.KeyCode == Keybinds.Ability4 then
+		Remotes.Ability:FireServer(4)
+	end
 end
 
 function InputHandler.OnInputEnded(input, gameProcessed)
-    if input.KeyCode == Keybinds.Block then
-        AnimationHandler.Stop("BlockIdle")
-        Remotes.Block:FireServer(false)
-    end
+	if input.KeyCode == Keybinds.Block then
+		AnimationHandler.Stop("BlockIdle")
+		Remotes.Block:FireServer(false)
+
+	elseif input.KeyCode == Keybinds.Uptilt or input.KeyCode == Enum.KeyCode.Space then
+		-- Track spacebar release for aerial finisher
+		SpacebarHeld = false
+		if AerialRemote then
+			AerialRemote:FireServer("SpacebarState", false)
+		end
+	end
 end
 
 function InputHandler.GetMoveDirection()
-    local char = Player.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return Vector3.zero end
+	local char = Player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return Vector3.zero end
 
-    local camera = workspace.CurrentCamera
-    local moveDir = Vector3.zero
+	local camera = workspace.CurrentCamera
+	local moveDir = Vector3.zero
 
-    if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-        moveDir = moveDir + camera.CFrame.LookVector
-    end
-    if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-        moveDir = moveDir - camera.CFrame.LookVector
-    end
-    if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-        moveDir = moveDir - camera.CFrame.RightVector
-    end
-    if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-        moveDir = moveDir + camera.CFrame.RightVector
-    end
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+		moveDir = moveDir + camera.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+		moveDir = moveDir - camera.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+		moveDir = moveDir - camera.CFrame.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+		moveDir = moveDir + camera.CFrame.RightVector
+	end
 
-    moveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+	moveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
 
-    if moveDir.Magnitude > 0 then
-        return moveDir.Unit
-    end
+	if moveDir.Magnitude > 0 then
+		return moveDir.Unit
+	end
 
-    return hrp.CFrame.LookVector
+	return hrp.CFrame.LookVector
+end
+
+-- Utility functions
+function InputHandler.IsSpacebarHeld()
+	return SpacebarHeld
+end
+
+function InputHandler.IsPlayerAirborne()
+	return IsAirborne
 end
 
 return InputHandler
@@ -1724,19 +1867,86 @@ function AnimationHandler.PlayBlock(character)
 end
 
 function AnimationHandler.PlayHitReaction(character, hitType)
-    local anim = "HitLight"
-    if hitType == "Final" then anim = "HitHeavy"
-    elseif hitType == "Uptilt" then anim = "HitLaunch" end
+	local anim = "HitLight"
+	if hitType == "Final" then anim = "HitHeavy"
+	elseif hitType == "Uptilt" then anim = "HitLaunch"
+	elseif hitType == "Aerial" then anim = "HitAerial"
+	elseif hitType == "Downslam" then anim = "HitSlam"
+	elseif hitType == "AirKnockback" then anim = "HitKnockback"
+	end
 
-    return AnimationHandler.Play(character, anim, {
-        priority = Enum.AnimationPriority.Action4,
-    })
+	return AnimationHandler.Play(character, anim, {
+		priority = Enum.AnimationPriority.Action4,
+	})
 end
 
 function AnimationHandler.PlayAbility(character, ability)
-    return AnimationHandler.Play(character, ability, {
-        priority = Enum.AnimationPriority.Action2,
-    })
+	return AnimationHandler.Play(character, ability, {
+		priority = Enum.AnimationPriority.Action2,
+	})
+end
+
+-- ==============================
+-- AERIAL ANIMATIONS
+-- ==============================
+
+function AnimationHandler.PlayAerialM1(character, airHit)
+	-- Use the same uptilt anim or a dedicated aerial animation
+	local animName = "AerialM1_" .. (airHit or 1)
+	local track = LoadedTracks[character] and LoadedTracks[character][animName]
+
+	-- Fallback to Uptilt animation if no dedicated aerial anim
+	if not track then
+		animName = "Uptilt"
+	end
+
+	return AnimationHandler.Play(character, animName, {
+		priority = Enum.AnimationPriority.Action3,
+		fadeIn = 0.03,
+	})
+end
+
+function AnimationHandler.PlayDownslam(character)
+	-- Try dedicated downslam anim, fallback to uptilt
+	local animName = "Downslam"
+	local track = LoadedTracks[character] and LoadedTracks[character][animName]
+
+	if not track then
+		animName = "Uptilt"  -- Fallback
+	end
+
+	return AnimationHandler.Play(character, animName, {
+		priority = Enum.AnimationPriority.Action3,
+		fadeIn = 0.03,
+	})
+end
+
+function AnimationHandler.PlayAirKnockback(character)
+	-- Try dedicated air knockback anim, fallback to M1_4
+	local animName = "AirKnockback"
+	local track = LoadedTracks[character] and LoadedTracks[character][animName]
+
+	if not track then
+		animName = "M1_4"  -- Fallback to finisher
+	end
+
+	return AnimationHandler.Play(character, animName, {
+		priority = Enum.AnimationPriority.Action3,
+		fadeIn = 0.03,
+	})
+end
+
+function AnimationHandler.Stop(character, animName)
+	character = character or Player.Character
+	if not character then return end
+
+	local tracks = LoadedTracks[character]
+	if not tracks then return end
+
+	local track = tracks[animName]
+	if track and track.IsPlaying then
+		track:Stop(0.1)
+	end
 end
 
 -- ==============================
@@ -6467,9 +6677,46 @@ local Arthur = {
         -- Hitbox
         HitboxSize = Vector3.new(4, 6, 4),
         HitboxOffset = Vector3.new(0, 2, -3),
+    },
 
-        -- Restrictions
-        MaxComboToUse = 2,       -- can’t uptilt after hit 3/4
+    --================================================
+    -- AERIAL COMBAT (NEW)
+    --================================================
+    Aerial = {
+        -- Max air M1s after uptilt
+        MaxAirHits = 2,
+
+        -- Air M1 data
+        AirM1 = {
+            Damage = 10,
+            Startup = 0.06,
+            Active = 0.08,
+            Recovery = 0.10,
+            HitboxSize = Vector3.new(5, 4, 5),
+        },
+
+        -- Downslam (not holding spacebar)
+        Downslam = {
+            Damage = 15,
+            SlamVelocity = 80,
+            BounceForce = 10,
+            GroundStun = 0.6,
+            ImpactRadius = 5,
+            Startup = 0.08,
+            Active = 0.15,
+            Recovery = 0.20,
+        },
+
+        -- Air Knockback (holding spacebar)
+        AirKnockback = {
+            Damage = 12,
+            KnockbackDistance = 60,
+            KnockbackLift = 15,
+            Stun = 0.5,
+            Startup = 0.06,
+            Active = 0.12,
+            Recovery = 0.15,
+        },
     },
 
     --================================================
@@ -6521,24 +6768,38 @@ local Arthur = {
     -- ANIMATIONS (IDS ONLY)
     --================================================
     Animations = {
+        -- Ground M1s
         M1_1 = "rbxassetid://12845340632",
         M1_2 = "rbxassetid://12845369253",
         M1_3 = "rbxassetid://12845398367",
         M1_4 = "rbxassetid://12845456406",
 
+        -- Uptilt (launcher)
         Uptilt = "rbxassetid://126734284253680",
 
+        -- Aerial attacks (use uptilt animation as fallback for now)
+        AerialM1_1 = "rbxassetid://126734284253680",
+        AerialM1_2 = "rbxassetid://126734284253680",
+        Downslam = "rbxassetid://12845456406",      -- Use M1_4 as placeholder
+        AirKnockback = "rbxassetid://12845456406",  -- Use M1_4 as placeholder
+
+        -- Block
         BlockIdle = "rbxassetid://12927194871",
         BlockHit = "rbxassetid://0",
 
+        -- Dash
         DashForward = "rbxassetid://11989948466",
         DashRight   = "rbxassetid://11997368950",
         DashLeft    = "rbxassetid://11997366704",
         DashBack    = "rbxassetid://11997364353",
 
+        -- Hit reactions
         HitLight = "rbxassetid://0",
         HitHeavy = "rbxassetid://0",
         HitLaunch = "rbxassetid://0",
+        HitAerial = "rbxassetid://0",
+        HitSlam = "rbxassetid://0",
+        HitKnockback = "rbxassetid://0",
         Stunned = "rbxassetid://0",
     },
 
@@ -6546,24 +6807,36 @@ local Arthur = {
     -- ANIMATION SPEED MULTIPLIERS
     --================================================
     AnimationSpeeds = {
-
-        -- M1 speed (lower = slower)
+        -- Ground M1 speed
         M1_1 = 1.35,
         M1_2 = 1.35,
         M1_3 = 1.35,
         M1_4 = 1.35,
 
+        -- Dash
         DashForward = 1.5,
         DashLeft = 1.5,
         DashRight = 1.5,
         DashBack = 1.5,
 
+        -- Uptilt
         Uptilt = 1.20,
 
+        -- Aerial (faster for snappy feel)
+        AerialM1_1 = 1.4,
+        AerialM1_2 = 1.4,
+        Downslam = 1.3,
+        AirKnockback = 1.3,
+
+        -- Block
         BlockIdle = 1.0,
 
+        -- Hit reactions
         HitLight = 0.3,
         HitHeavy = 1.10,
+        HitAerial = 1.0,
+        HitSlam = 1.0,
+        HitKnockback = 1.0,
     },
 
     --================================================
@@ -6985,8 +7258,9 @@ return Arthur
 				<Properties>
 					<Content name="LinkedSource"><null></null></Content>
 					<ProtectedString name="Source"><![CDATA[--[[
-    Config.lua
-    Central combat configuration - SIFU FEEL TUNING
+	Config.lua
+	Central combat configuration - SIFU/GENSHIN/SEKIRO FEEL
+	REFACTORED: Added aerial combat, proper state transitions
 ]]
 
 local Config = {}
@@ -6995,156 +7269,248 @@ local Config = {}
 -- STAMINA SETTINGS
 --------------------------------------------------------------------------------
 Config.Stamina = {
-    Max = 100,
-    RegenRate = 20,         -- Slightly faster for flow
-    RegenDelay = 0.8,       -- Shorter delay
+	Max = 100,
+	RegenRate = 20,
+	RegenDelay = 0.8,
 }
 
 --------------------------------------------------------------------------------
 -- PLAYER DEFAULTS
 --------------------------------------------------------------------------------
 Config.Player = {
-    WalkSpeed = 16,
-    JumpPower = 50,
+	WalkSpeed = 16,
+	JumpPower = 50,
 }
-
---------------------------------------------------------------------------------
--- POSTURE SYSTEM (Keep your Sekiro system, just tune it)
--- NOTE: Nested inside Combat to match existing code
---------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
 -- HIT FEEL / GAME JUICE (SIFU = SNAPPY, PUNCHY)
 --------------------------------------------------------------------------------
 Config.HitFeel = {
-    -- Hitstop (SHORTER = snappier, more responsive)
-    HitstopLight = 0.025,       -- Was 0.04
-    HitstopHeavy = 0.04,        -- Was 0.06
-    HitstopFinal = 0.055,       -- Was 0.08
-    HitstopDeflect = 0.06,
+	-- Hitstop (SHORTER = snappier, more responsive)
+	HitstopLight = 0.025,
+	HitstopHeavy = 0.04,
+	HitstopFinal = 0.055,
+	HitstopDeflect = 0.06,
+	HitstopAerial = 0.03,       -- Snappy air hits
+	HitstopDownslam = 0.08,     -- Satisfying ground impact
 
-    -- Camera shake (slightly reduced for cleaner look)
-    ShakeLight = 0.3,
-    ShakeHeavy = 0.5,
-    ShakeFinal = 0.7,
-    ShakeDuration = 0.10,       -- Shorter shake
+	-- Camera shake
+	ShakeLight = 0.3,
+	ShakeHeavy = 0.5,
+	ShakeFinal = 0.7,
+	ShakeUptilt = 0.4,
+	ShakeDownslam = 0.8,
+	ShakeDuration = 0.10,
 
-    -- Screen flash
-    FlashAlpha = 0.12,
-    FlashDuration = 0.05,
+	-- Screen flash
+	FlashAlpha = 0.12,
+	FlashDuration = 0.05,
 
-    -- Enemy flash
-    EnemyFlashColor = Color3.new(1, 1, 1),
-    EnemyFlashDuration = 0.05,
+	-- Enemy flash
+	EnemyFlashColor = Color3.new(1, 1, 1),
+	EnemyFlashDuration = 0.05,
 
-    -- Damage numbers
-    DamageNumberDuration = 0.5,
-    DamageNumberRise = 1.5,
+	-- Damage numbers
+	DamageNumberDuration = 0.5,
+	DamageNumberRise = 1.5,
 
-    -- Face attacker
-    FaceAttackerDuration = 0.03,
+	-- Face attacker
+	FaceAttackerDuration = 0.03,
 }
 
 --------------------------------------------------------------------------------
 -- COMBAT MECHANICS (SIFU FLOW)
 --------------------------------------------------------------------------------
 Config.Combat = {
-    -- Lock-on
-    LockOnRange = 50,
-    LockOnBreakRange = 60,
+	-- Lock-on
+	LockOnRange = 50,
+	LockOnBreakRange = 60,
 
-    -- Combo (faster flow)
-    ComboResetCooldown = 1.0,   -- Was 1.5 - faster reset
-    ComboWindow = 0.50,         -- Generous chaining
+	-- Combo (faster flow)
+	ComboResetCooldown = 1.0,
+	ComboWindow = 0.50,
 
-    -- Input buffering (RESPONSIVE)
-    InputBufferWindow = 0.20,   -- Was 0.15 - more forgiving
+	-- Input buffering (RESPONSIVE)
+	InputBufferWindow = 0.20,
 
-    -- Canceling
-    DashCancelsAttack = true,
-    BlockCancelsRecovery = true,
-    DashCancelWindow = 0.08,    -- Can cancel earlier
+	-- Canceling
+	DashCancelsAttack = true,
+	BlockCancelsRecovery = true,
+	DashCancelWindow = 0.08,
 
-    -- POSTURE SYSTEM (nested here to match existing code)
-    Posture = {
-        Max = 100,
-        RegenRate = 10,
-        RegenDelay = 1.8,
-        PressureRegenMultiplier = 0.2,
-        LowHPMultiplier = 0.5,
-    },
+	-- POSTURE SYSTEM
+	Posture = {
+		Max = 100,
+		RegenRate = 10,
+		RegenDelay = 1.8,
+		PressureRegenMultiplier = 0.2,
+		LowHPMultiplier = 0.5,
+	},
 
-    -- DEFLECT SYSTEM
-    Deflect = {
-        Window = 0.18,
-        PostureDamage = 25,
-        HitstopDuration = 0.06,
-        PushbackDistance = 2,
-    },
+	-- DEFLECT SYSTEM
+	Deflect = {
+		Window = 0.18,
+		PostureDamage = 25,
+		HitstopDuration = 0.06,
+		PushbackDistance = 2,
+	},
 
-    -- GUARD BREAK
-    GuardBreak = {
-        StunDuration = 0.9,
-        ExecutionWindow = 1.2,
-        ExecutionDamage = 50,
-        ExecutionKnockback = 150,
-    },
+	-- GUARD BREAK
+	GuardBreak = {
+		StunDuration = 0.9,
+		ExecutionWindow = 1.2,
+		ExecutionDamage = 50,
+		ExecutionKnockback = 150,
+	},
 
-    -- HIT FOLLOW (attacker follows victim)
-    HitFollow = {
-        AttackerFollowDistance = 4,
-        AttackerFollowSpeed = 50,
-        VictimKnockbackMultiplier = 0.7,
-        VictimLaunchMultiplier = 0.8,
-    },
+	-- HIT FOLLOW (attacker follows victim)
+	HitFollow = {
+		AttackerFollowDistance = 4,
+		AttackerFollowSpeed = 50,
+		VictimKnockbackMultiplier = 0.7,
+		VictimLaunchMultiplier = 0.8,
+	},
+}
+
+--------------------------------------------------------------------------------
+-- AERIAL COMBAT (NEW - Genshin/Sifu style)
+--------------------------------------------------------------------------------
+Config.Aerial = {
+	-- Uptilt rules
+	UptiltAllowedOnCombo = 3,      -- Can only uptilt on combo hit 3
+	UptiltDoesNotResetCombo = true, -- Uptilt forks into aerial, doesn't reset
+
+	-- Air combo rules
+	MaxAirHits = 2,                 -- Max M1s after uptilt
+	AirHitsCountTowardsCombo = true, -- Air M1s count as combo 4, 5
+
+	-- Launch physics
+	LaunchVelocity = 45,            -- Upward velocity on uptilt
+	LaunchForwardPush = 8,          -- Forward push on launch
+	VictimAirGravity = 0.6,         -- Reduced gravity while in combo
+	AttackerAirGravity = 0.5,       -- Attacker floats with victim
+
+	-- Air stun (TrueStun - cannot escape)
+	AirTrueStunDuration = 0.4,      -- Per air hit
+	AirKnockbackMultiplier = 0.3,   -- Reduced knockback to keep victim close
+
+	-- Finisher rules (spacebar input)
+	FinisherInputWindow = 0.3,      -- Time to input finisher after last air hit
+
+	-- Downslam (not holding spacebar)
+	DownslamVelocity = 80,          -- Downward velocity
+	DownslamDamage = 15,
+	DownslamBounce = 10,            -- Slight bounce on impact
+	DownslamStun = 0.6,             -- Ground stun duration
+	DownslamGroundImpactRadius = 5, -- VFX radius
+
+	-- Air Knockback (holding spacebar)
+	AirKnockbackDistance = 60,      -- Horizontal knockback
+	AirKnockbackLift = 15,          -- Slight upward angle
+	AirKnockbackDamage = 12,
+	AirKnockbackStun = 0.5,
+
+	-- Attacker air movement
+	AttackerFollowsVictim = true,   -- Attacker stays close in air
+	AttackerAirMoveSpeed = 40,      -- How fast attacker follows
+	AttackerAirStandoff = 3,        -- Distance from victim in air
+
+	-- Animation timing
+	UptiltStartup = 0.05,
+	UptiltActive = 0.10,
+	UptiltRecovery = 0.08,
+	AirM1Startup = 0.06,
+	AirM1Active = 0.08,
+	AirM1Recovery = 0.10,
+	DownslamStartup = 0.08,
+	DownslamActive = 0.15,
+	DownslamRecovery = 0.20,
+	AirKnockbackStartup = 0.06,
+	AirKnockbackActive = 0.12,
+	AirKnockbackRecovery = 0.15,
+
+	-- Hitbox sizes
+	UptiltHitbox = Vector3.new(4, 6, 4),
+	AirM1Hitbox = Vector3.new(5, 4, 5),
+	DownslamHitbox = Vector3.new(6, 8, 6),
+	AirKnockbackHitbox = Vector3.new(5, 4, 6),
 }
 
 --------------------------------------------------------------------------------
 -- COMBAT LOCK / FOLLOW (THE KEY TO SIFU FEEL)
 --------------------------------------------------------------------------------
 Config.CombatLock = {
-    -- How close attacker stays to victim
-    StandoffDistance = 4,     -- Studs in front of victim
+	-- How close attacker stays to victim
+	StandoffDistance = 4,
 
-    -- Follow responsiveness (HIGHER = tighter, more glued)
-    FollowResponsiveness = 50,  -- Was 40 - tighter follow
-    OrientResponsiveness = 45,  -- Was 35 - faster face snap
+	-- Follow responsiveness (HIGHER = tighter, more glued)
+	FollowResponsiveness = 50,
+	OrientResponsiveness = 45,
 
-    -- Physics
-    MaxForce = 150000,          -- Strong lock
+	-- Physics
+	MaxForce = 150000,
 
-    -- Duration
-    DefaultLockDuration = 0.5,  -- How long lock lasts per hit
-    ExtendOnHit = 0.3,          -- Extend lock on subsequent hits
+	-- Duration
+	DefaultLockDuration = 0.5,
+	ExtendOnHit = 0.3,
 
-    -- Both players ALWAYS face each other
-    ForceMutualFacing = true,
+	-- Both players ALWAYS face each other
+	ForceMutualFacing = true,
+
+	-- Aerial lock settings
+	AerialLockDuration = 2.0,     -- Lock during entire air combo
+	AerialStandoffDistance = 3,   -- Closer in air
 }
 
 --------------------------------------------------------------------------------
 -- KNOCKBACK TUNING (SIFU = LESS FLOATY)
 --------------------------------------------------------------------------------
 Config.Knockback = {
-    -- Global multipliers
-    DistanceMultiplier = 0.7,   -- Less knockback distance (keep enemies close)
-    LiftMultiplier = 0.8,       -- Less vertical pop
+	-- Global multipliers
+	DistanceMultiplier = 0.7,
+	LiftMultiplier = 0.8,
 
-    -- Attacker follow
-    AttackerFollowDistance = 2.0,   -- Stay 2 studs from victim
-    AttackerFollowSpeed = 50,       -- Fast follow
+	-- Attacker follow
+	AttackerFollowDistance = 2.0,
+	AttackerFollowSpeed = 50,
 
-    -- Victim
-    VictimHitstunMultiplier = 0.85, -- Slightly shorter hitstun (faster pace)
+	-- Victim
+	VictimHitstunMultiplier = 0.85,
+}
+
+--------------------------------------------------------------------------------
+-- ANIMATION TRANSITIONS (Smooth blending)
+--------------------------------------------------------------------------------
+Config.Animation = {
+	-- Fade times
+	DefaultFadeIn = 0.05,
+	DefaultFadeOut = 0.1,
+	CombatFadeIn = 0.03,          -- Faster for combat responsiveness
+	CombatFadeOut = 0.05,
+
+	-- Priority overrides
+	M1Priority = Enum.AnimationPriority.Action2,
+	AerialPriority = Enum.AnimationPriority.Action3,
+	HitReactionPriority = Enum.AnimationPriority.Action4,
+
+	-- Smooth transitions between combat moves
+	ComboTransitionTime = 0.08,   -- Blend between M1s
+	AerialTransitionTime = 0.06,  -- Faster in air
+
+	-- Tween settings for movement
+	MovementTweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	AerialTweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
 }
 
 --------------------------------------------------------------------------------
 -- DEBUG OPTIONS
 --------------------------------------------------------------------------------
 Config.Debug = {
-    ShowHitboxes = false,
-    LogStateChanges = false,
-    LogCombatEvents = false,
-    LogCombatLock = false,
+	ShowHitboxes = false,
+	LogStateChanges = false,
+	LogCombatEvents = false,
+	LogCombatLock = false,
+	LogAerialState = false,
 }
 
 return Config]]></ProtectedString>
@@ -7176,6 +7542,7 @@ return Config]]></ProtectedString>
 						<ProtectedString name="Source"><![CDATA[--[[
 	StateManager.lua
 	Manages player combat state + posture system
+	REFACTORED: Proper state machine with flags, TrueStun, and aerial support
 	Location: ReplicatedStorage/Combat/Modules/StateManager
 ]]
 
@@ -7187,15 +7554,33 @@ local StateManager = {}
 
 local PlayerData = {}
 
+-- ========================================
+-- STATE DEFINITIONS
+-- ========================================
+
 StateManager.States = {
-    IDLE = "Idle",
-    ATTACKING = "Attacking",
-    BLOCKING = "Blocking",
-    STUNNED = "Stunned",
-    DASHING = "Dashing",
-    RECOVERY = "Recovery",
-    AIRBORNE = "Airborne",
-    GUARD_BROKEN = "GuardBroken", -- NEW
+	IDLE = "Idle",
+	ATTACKING = "Attacking",
+	BLOCKING = "Blocking",
+	STUNNED = "Stunned",
+	TRUE_STUNNED = "TrueStunned",  -- Cannot act, cannot iframe, cannot counter
+	DASHING = "Dashing",
+	RECOVERY = "Recovery",
+	AIRBORNE = "Airborne",
+	AERIAL_ATTACKING = "AerialAttacking",
+	GUARD_BROKEN = "GuardBroken",
+	LAUNCHED = "Launched",  -- Being launched upward
+}
+
+-- ========================================
+-- FLAG SYSTEM - Temporary modifiers
+-- ========================================
+
+StateManager.Flags = {
+	INVULNERABLE = "Invulnerable",  -- I-frames
+	SUPER_ARMOR = "SuperArmor",     -- Can't be interrupted
+	AERIAL_LOCKED = "AerialLocked", -- Locked in aerial combo (victim)
+	COMBO_OWNER = "ComboOwner",     -- Currently doing a combo
 }
 
 -- ========================================
@@ -7203,41 +7588,106 @@ StateManager.States = {
 -- ========================================
 
 function StateManager.Setup(player, options)
-    options = options or {}
+	options = options or {}
 
-    PlayerData[player] = {
-        character = options.character or "Arthur",
-        state = "Idle",
-        combo = 0,
-        lastAttack = 0,
-        stamina = Config.Stamina.Max,
-        lastStamUse = 0,
+	PlayerData[player] = {
+		-- Core state
+		character = options.character or "Arthur",
+		state = "Idle",
+		previousState = "Idle",
 
-        -- POSTURE SYSTEM
-        posture = Config.Combat.Posture.Max,
-        maxPosture = Config.Combat.Posture.Max,
-        lastPostureDamage = 0,
-        isGuardBroken = false,
-        lastPressureTime = 0,
+		-- Combo system
+		combo = 0,
+		groundCombo = 0,     -- Ground M1 count before uptilt
+		airCombo = 0,        -- Aerial M1 count after uptilt
+		totalCombo = 0,      -- Total hits in current combo
+		lastAttack = 0,
+		comboStartTime = 0,
 
-        blocking = false,
-        blockStart = 0,
-        iframes = false,
-        iframeEnd = 0,
-        awakened = false,
-    }
+		-- Aerial state
+		isAirborne = false,
+		launchTime = 0,
+		uptiltCombo = 0,     -- Which ground combo hit triggered uptilt
+		maxAirHits = 2,      -- Max air M1s after uptilt
+
+		-- Stamina
+		stamina = Config.Stamina.Max,
+		lastStamUse = 0,
+
+		-- Posture system
+		posture = Config.Combat.Posture.Max,
+		maxPosture = Config.Combat.Posture.Max,
+		lastPostureDamage = 0,
+		isGuardBroken = false,
+		lastPressureTime = 0,
+
+		-- Blocking
+		blocking = false,
+		blockStart = 0,
+
+		-- Flags (with expiry times)
+		flags = {},
+
+		-- I-frames
+		iframes = false,
+		iframeEnd = 0,
+
+		-- Awakening
+		awakened = false,
+
+		-- Combat lock target
+		lockedTarget = nil,
+		lockedBy = nil,
+	}
 end
 
 function StateManager.Remove(player)
-    PlayerData[player] = nil
+	PlayerData[player] = nil
 end
 
 function StateManager.Get(player)
-    return PlayerData[player]
+	return PlayerData[player]
 end
 
 function StateManager.GetAll()
-    return PlayerData
+	return PlayerData
+end
+
+-- ========================================
+-- FLAG SYSTEM
+-- ========================================
+
+function StateManager.AddFlag(player, flag, duration)
+	local data = PlayerData[player]
+	if not data then return end
+
+	data.flags[flag] = tick() + (duration or math.huge)
+end
+
+function StateManager.RemoveFlag(player, flag)
+	local data = PlayerData[player]
+	if data then
+		data.flags[flag] = nil
+	end
+end
+
+function StateManager.HasFlag(player, flag)
+	local data = PlayerData[player]
+	if not data or not data.flags[flag] then return false end
+
+	if tick() >= data.flags[flag] then
+		data.flags[flag] = nil
+		return false
+	end
+
+	return true
+end
+
+function StateManager.ClearAllFlags(player)
+	local data = PlayerData[player]
+	if data then
+		data.flags = {}
+	end
 end
 
 -- ========================================
@@ -7245,43 +7695,226 @@ end
 -- ========================================
 
 function StateManager.SetState(player, newState)
-    local data = PlayerData[player]
-    if data then
-        data.state = newState
-    end
+	local data = PlayerData[player]
+	if data then
+		data.previousState = data.state
+		data.state = newState
+	end
 end
 
 function StateManager.GetState(player)
-    local data = PlayerData[player]
-    return data and data.state or "Idle"
+	local data = PlayerData[player]
+	return data and data.state or "Idle"
 end
 
+function StateManager.GetPreviousState(player)
+	local data = PlayerData[player]
+	return data and data.previousState or "Idle"
+end
+
+-- State checks
 function StateManager.IsIdle(player)
-    return StateManager.GetState(player) == StateManager.States.IDLE
+	return StateManager.GetState(player) == StateManager.States.IDLE
 end
 
 function StateManager.IsAttacking(player)
-    return StateManager.GetState(player) == StateManager.States.ATTACKING
+	local state = StateManager.GetState(player)
+	return state == StateManager.States.ATTACKING or state == StateManager.States.AERIAL_ATTACKING
 end
 
 function StateManager.IsStunned(player)
-    return StateManager.GetState(player) == StateManager.States.STUNNED
+	local state = StateManager.GetState(player)
+	return state == StateManager.States.STUNNED or state == StateManager.States.TRUE_STUNNED
+end
+
+function StateManager.IsTrueStunned(player)
+	return StateManager.GetState(player) == StateManager.States.TRUE_STUNNED
 end
 
 function StateManager.IsBlocking(player)
-    return StateManager.GetState(player) == StateManager.States.BLOCKING
+	return StateManager.GetState(player) == StateManager.States.BLOCKING
 end
 
 function StateManager.IsDashing(player)
-    return StateManager.GetState(player) == StateManager.States.DASHING
+	return StateManager.GetState(player) == StateManager.States.DASHING
 end
 
 function StateManager.IsRecovery(player)
-    return StateManager.GetState(player) == StateManager.States.RECOVERY
+	return StateManager.GetState(player) == StateManager.States.RECOVERY
 end
 
 function StateManager.IsGuardBrokenState(player)
-    return StateManager.GetState(player) == StateManager.States.GUARD_BROKEN
+	return StateManager.GetState(player) == StateManager.States.GUARD_BROKEN
+end
+
+function StateManager.IsAirborne(player)
+	local data = PlayerData[player]
+	if not data then return false end
+
+	local state = data.state
+	return data.isAirborne or
+		   state == StateManager.States.AIRBORNE or
+		   state == StateManager.States.AERIAL_ATTACKING or
+		   state == StateManager.States.LAUNCHED
+end
+
+function StateManager.IsLaunched(player)
+	return StateManager.GetState(player) == StateManager.States.LAUNCHED
+end
+
+-- Permission checks (for combat authority)
+function StateManager.CanAct(player)
+	local data = PlayerData[player]
+	if not data then return false end
+
+	local state = data.state
+
+	-- Cannot act in these states
+	if state == StateManager.States.TRUE_STUNNED then return false end
+	if state == StateManager.States.GUARD_BROKEN then return false end
+	if state == StateManager.States.LAUNCHED then return false end
+	if StateManager.HasFlag(player, StateManager.Flags.AERIAL_LOCKED) then return false end
+
+	return true
+end
+
+function StateManager.CanBeHit(player)
+	-- Check invulnerability flag
+	if StateManager.HasFlag(player, StateManager.Flags.INVULNERABLE) then
+		return false
+	end
+
+	-- Check i-frames
+	if StateManager.HasIFrames(player) then
+		return false
+	end
+
+	return true
+end
+
+function StateManager.CanDash(player)
+	if not StateManager.CanAct(player) then return false end
+
+	local state = StateManager.GetState(player)
+	if state == StateManager.States.STUNNED then return false end
+	if state == StateManager.States.DASHING then return false end
+
+	return true
+end
+
+function StateManager.CanBlock(player)
+	if not StateManager.CanAct(player) then return false end
+
+	local state = StateManager.GetState(player)
+	if StateManager.IsAirborne(player) then return false end
+
+	return true
+end
+
+-- ========================================
+-- AERIAL SYSTEM
+-- ========================================
+
+function StateManager.SetAirborne(player, isAirborne)
+	local data = PlayerData[player]
+	if data then
+		data.isAirborne = isAirborne
+		if isAirborne then
+			data.launchTime = tick()
+		end
+	end
+end
+
+function StateManager.GetAirTime(player)
+	local data = PlayerData[player]
+	if not data or not data.isAirborne then return 0 end
+	return tick() - (data.launchTime or tick())
+end
+
+function StateManager.SetUptiltCombo(player, groundCombo)
+	local data = PlayerData[player]
+	if data then
+		data.uptiltCombo = groundCombo
+		data.airCombo = 0
+	end
+end
+
+function StateManager.GetUptiltCombo(player)
+	local data = PlayerData[player]
+	return data and data.uptiltCombo or 0
+end
+
+function StateManager.GetAirCombo(player)
+	local data = PlayerData[player]
+	return data and data.airCombo or 0
+end
+
+function StateManager.IncrementAirCombo(player)
+	local data = PlayerData[player]
+	if data then
+		data.airCombo = data.airCombo + 1
+		data.totalCombo = data.totalCombo + 1
+		return data.airCombo
+	end
+	return 0
+end
+
+function StateManager.GetMaxAirHits(player)
+	local data = PlayerData[player]
+	return data and data.maxAirHits or 2
+end
+
+function StateManager.CanDoAirAttack(player)
+	local data = PlayerData[player]
+	if not data then return false end
+
+	return data.isAirborne and data.airCombo < data.maxAirHits
+end
+
+function StateManager.ResetAerialState(player)
+	local data = PlayerData[player]
+	if data then
+		data.isAirborne = false
+		data.airCombo = 0
+		data.uptiltCombo = 0
+		data.launchTime = 0
+	end
+end
+
+-- ========================================
+-- COMBAT LOCK SYSTEM
+-- ========================================
+
+function StateManager.SetLockedTarget(player, target)
+	local data = PlayerData[player]
+	if data then
+		data.lockedTarget = target
+	end
+end
+
+function StateManager.GetLockedTarget(player)
+	local data = PlayerData[player]
+	return data and data.lockedTarget
+end
+
+function StateManager.SetLockedBy(player, attacker)
+	local data = PlayerData[player]
+	if data then
+		data.lockedBy = attacker
+	end
+end
+
+function StateManager.GetLockedBy(player)
+	local data = PlayerData[player]
+	return data and data.lockedBy
+end
+
+function StateManager.ClearLocks(player)
+	local data = PlayerData[player]
+	if data then
+		data.lockedTarget = nil
+		data.lockedBy = nil
+	end
 end
 
 -- ========================================
@@ -7289,101 +7922,141 @@ end
 -- ========================================
 
 function StateManager.GetPosture(player)
-    local data = PlayerData[player]
-    return data and data.posture or 0
+	local data = PlayerData[player]
+	return data and data.posture or 0
 end
 
 function StateManager.GetMaxPosture(player)
-    local data = PlayerData[player]
-    return data and data.maxPosture or Config.Combat.Posture.Max
+	local data = PlayerData[player]
+	return data and data.maxPosture or Config.Combat.Posture.Max
 end
 
 function StateManager.DamagePosture(player, amount)
-    local data = PlayerData[player]
-    if not data then return false end
+	local data = PlayerData[player]
+	if not data then return false end
 
-    data.posture = math.max(0, data.posture - amount)
-    data.lastPostureDamage = tick()
+	data.posture = math.max(0, data.posture - amount)
+	data.lastPostureDamage = tick()
 
-    -- Check for guard break
-    if data.posture <= 0 and not data.isGuardBroken then
-        data.isGuardBroken = true
-        return true -- guard break triggered
-    end
+	if data.posture <= 0 and not data.isGuardBroken then
+		data.isGuardBroken = true
+		return true
+	end
 
-    return false
+	return false
 end
 
 function StateManager.RegenPosture(player, amount)
-    local data = PlayerData[player]
-    if not data then return end
+	local data = PlayerData[player]
+	if not data then return end
 
-    data.posture = math.min(data.maxPosture, data.posture + amount)
+	data.posture = math.min(data.maxPosture, data.posture + amount)
 end
 
 function StateManager.IsGuardBroken(player)
-    local data = PlayerData[player]
-    return data and data.isGuardBroken or false
+	local data = PlayerData[player]
+	return data and data.isGuardBroken or false
 end
 
 function StateManager.ClearGuardBreak(player)
-    local data = PlayerData[player]
-    if data then
-        data.isGuardBroken = false
-        data.posture = data.maxPosture -- restore posture on recovery
-    end
+	local data = PlayerData[player]
+	if data then
+		data.isGuardBroken = false
+		data.posture = data.maxPosture
+	end
 end
 
 function StateManager.UpdatePressure(player)
-    local data = PlayerData[player]
-    if data then
-        data.lastPressureTime = tick()
-    end
+	local data = PlayerData[player]
+	if data then
+		data.lastPressureTime = tick()
+	end
 end
 
 function StateManager.TimeSincePressure(player)
-    local data = PlayerData[player]
-    if not data then return math.huge end
-    return tick() - (data.lastPressureTime or 0)
+	local data = PlayerData[player]
+	if not data then return math.huge end
+	return tick() - (data.lastPressureTime or 0)
 end
 
 function StateManager.TimeSincePostureDamage(player)
-    local data = PlayerData[player]
-    if not data then return math.huge end
-    return tick() - (data.lastPostureDamage or 0)
+	local data = PlayerData[player]
+	if not data then return math.huge end
+	return tick() - (data.lastPostureDamage or 0)
 end
 
 -- ========================================
--- COMBO SYSTEM
+-- COMBO SYSTEM (Enhanced)
 -- ========================================
 
 function StateManager.GetCombo(player)
-    local data = PlayerData[player]
-    return data and data.combo or 0
+	local data = PlayerData[player]
+	return data and data.combo or 0
+end
+
+function StateManager.GetGroundCombo(player)
+	local data = PlayerData[player]
+	return data and data.groundCombo or 0
+end
+
+function StateManager.GetTotalCombo(player)
+	local data = PlayerData[player]
+	return data and data.totalCombo or 0
 end
 
 function StateManager.SetCombo(player, combo)
-    local data = PlayerData[player]
-    if data then
-        data.combo = combo
-    end
+	local data = PlayerData[player]
+	if data then
+		data.combo = combo
+		if not data.isAirborne then
+			data.groundCombo = combo
+		end
+	end
+end
+
+function StateManager.IncrementCombo(player)
+	local data = PlayerData[player]
+	if data then
+		data.combo = data.combo + 1
+		data.totalCombo = data.totalCombo + 1
+		if not data.isAirborne then
+			data.groundCombo = data.groundCombo + 1
+		end
+		return data.combo
+	end
+	return 0
 end
 
 function StateManager.ResetCombo(player)
-    StateManager.SetCombo(player, 0)
+	local data = PlayerData[player]
+	if data then
+		data.combo = 0
+		data.groundCombo = 0
+		data.airCombo = 0
+		data.totalCombo = 0
+		data.uptiltCombo = 0
+		data.comboStartTime = 0
+	end
+end
+
+function StateManager.StartCombo(player)
+	local data = PlayerData[player]
+	if data then
+		data.comboStartTime = tick()
+	end
 end
 
 function StateManager.SetLastAttack(player)
-    local data = PlayerData[player]
-    if data then
-        data.lastAttack = tick()
-    end
+	local data = PlayerData[player]
+	if data then
+		data.lastAttack = tick()
+	end
 end
 
 function StateManager.TimeSinceAttack(player)
-    local data = PlayerData[player]
-    if not data then return math.huge end
-    return tick() - (data.lastAttack or 0)
+	local data = PlayerData[player]
+	if not data then return math.huge end
+	return tick() - (data.lastAttack or 0)
 end
 
 -- ========================================
@@ -7391,24 +8064,24 @@ end
 -- ========================================
 
 function StateManager.SetBlocking(player, isBlocking)
-    local data = PlayerData[player]
-    if not data then return end
+	local data = PlayerData[player]
+	if not data then return end
 
-    data.blocking = isBlocking
-    if isBlocking then
-        data.blockStart = tick()
-    end
+	data.blocking = isBlocking
+	if isBlocking then
+		data.blockStart = tick()
+	end
 end
 
 function StateManager.IsBlockingActive(player)
-    local data = PlayerData[player]
-    return data and data.blocking or false
+	local data = PlayerData[player]
+	return data and data.blocking or false
 end
 
 function StateManager.GetBlockTime(player)
-    local data = PlayerData[player]
-    if not data or not data.blocking then return math.huge end
-    return tick() - (data.blockStart or tick())
+	local data = PlayerData[player]
+	if not data or not data.blocking then return math.huge end
+	return tick() - (data.blockStart or tick())
 end
 
 -- ========================================
@@ -7416,31 +8089,33 @@ end
 -- ========================================
 
 function StateManager.SetIFrames(player, duration)
-    local data = PlayerData[player]
-    if data then
-        data.iframes = true
-        data.iframeEnd = tick() + duration
-    end
+	local data = PlayerData[player]
+	if data then
+		data.iframes = true
+		data.iframeEnd = tick() + duration
+		StateManager.AddFlag(player, StateManager.Flags.INVULNERABLE, duration)
+	end
 end
 
 function StateManager.ClearIFrames(player)
-    local data = PlayerData[player]
-    if data then
-        data.iframes = false
-        data.iframeEnd = 0
-    end
+	local data = PlayerData[player]
+	if data then
+		data.iframes = false
+		data.iframeEnd = 0
+		StateManager.RemoveFlag(player, StateManager.Flags.INVULNERABLE)
+	end
 end
 
 function StateManager.HasIFrames(player)
-    local data = PlayerData[player]
-    if not data or not data.iframes then return false end
+	local data = PlayerData[player]
+	if not data or not data.iframes then return false end
 
-    if tick() >= data.iframeEnd then
-        StateManager.ClearIFrames(player)
-        return false
-    end
+	if tick() >= data.iframeEnd then
+		StateManager.ClearIFrames(player)
+		return false
+	end
 
-    return true
+	return true
 end
 
 -- ========================================
@@ -7448,39 +8123,39 @@ end
 -- ========================================
 
 function StateManager.GetStamina(player)
-    local data = PlayerData[player]
-    return data and data.stamina or 0
+	local data = PlayerData[player]
+	return data and data.stamina or 0
 end
 
 function StateManager.UseStamina(player, amount)
-    local data = PlayerData[player]
-    if not data then return false end
+	local data = PlayerData[player]
+	if not data then return false end
 
-    if data.stamina >= amount then
-        data.stamina = data.stamina - amount
-        data.lastStamUse = tick()
-        return true
-    end
+	if data.stamina >= amount then
+		data.stamina = data.stamina - amount
+		data.lastStamUse = tick()
+		return true
+	end
 
-    return false
+	return false
 end
 
 function StateManager.HasStamina(player, amount)
-    local data = PlayerData[player]
-    return data and data.stamina >= amount or false
+	local data = PlayerData[player]
+	return data and data.stamina >= amount or false
 end
 
 function StateManager.RegenStamina(player, amount, maxStamina)
-    local data = PlayerData[player]
-    if data then
-        data.stamina = math.min(maxStamina, data.stamina + amount)
-    end
+	local data = PlayerData[player]
+	if data then
+		data.stamina = math.min(maxStamina, data.stamina + amount)
+	end
 end
 
 function StateManager.TimeSinceStamUse(player)
-    local data = PlayerData[player]
-    if not data then return math.huge end
-    return tick() - (data.lastStamUse or 0)
+	local data = PlayerData[player]
+	if not data then return math.huge end
+	return tick() - (data.lastStamUse or 0)
 end
 
 -- ========================================
@@ -7488,15 +8163,42 @@ end
 -- ========================================
 
 function StateManager.GetCharacter(player)
-    local data = PlayerData[player]
-    return data and data.character or "Arthur"
+	local data = PlayerData[player]
+	return data and data.character or "Arthur"
 end
 
 function StateManager.SetCharacter(player, characterName)
-    local data = PlayerData[player]
-    if data then
-        data.character = characterName
-    end
+	local data = PlayerData[player]
+	if data then
+		data.character = characterName
+	end
+end
+
+-- ========================================
+-- FULL RESET (for respawn, etc.)
+-- ========================================
+
+function StateManager.FullReset(player)
+	local data = PlayerData[player]
+	if not data then return end
+
+	data.state = StateManager.States.IDLE
+	data.previousState = StateManager.States.IDLE
+	data.combo = 0
+	data.groundCombo = 0
+	data.airCombo = 0
+	data.totalCombo = 0
+	data.uptiltCombo = 0
+	data.isAirborne = false
+	data.launchTime = 0
+	data.blocking = false
+	data.iframes = false
+	data.iframeEnd = 0
+	data.flags = {}
+	data.lockedTarget = nil
+	data.lockedBy = nil
+	data.posture = data.maxPosture
+	data.isGuardBroken = false
 end
 
 return StateManager]]></ProtectedString>
@@ -15105,6 +15807,7 @@ local HandlersFolder = script.Parent.Handlers
 local CharacterRegistry = require(HandlersFolder.CharacterRegistry)
 local AttackHandler = require(HandlersFolder.AttackHandler)
 local UptiltHandler = require(HandlersFolder.UptiltHandler)
+local AerialHandler = require(HandlersFolder.AerialHandler)
 local BlockHandler = require(HandlersFolder.BlockHandler)
 local DashHandler = require(HandlersFolder.DashHandler)
 local PassiveHandler = require(HandlersFolder.PassiveHandler)
@@ -15114,6 +15817,7 @@ local CombatLockHandler = require(HandlersFolder.AttackHandler.CombatLock)
 CharacterRegistry.Init(Remotes)
 AttackHandler.Init(Remotes, CharacterRegistry)
 UptiltHandler.Init(Remotes, CharacterRegistry)
+AerialHandler.Init(Remotes, CharacterRegistry)
 BlockHandler.Init(Remotes, CharacterRegistry)
 DashHandler.Init(Remotes, CharacterRegistry)
 PassiveHandler.Init(Remotes, CharacterRegistry)
@@ -15939,6 +16643,693 @@ return DashHandler
 						<int64 name="SourceAssetId">-1</int64>
 						<BinaryString name="Tags"></BinaryString>
 						<UniqueId name="UniqueId">693be351eceb2b8309572e270000c428</UniqueId>
+					</Properties>
+				</Item>
+				<Item class="ModuleScript" referent="RBX_UPTILTHANDLER_001">
+					<Properties>
+						<Content name="LinkedSource"><null></null></Content>
+						<ProtectedString name="Source"><![CDATA[--[[
+	UptiltHandler.lua
+	Handles uptilt launcher attacks and transitions to aerial combat
+	Location: ServerScriptService/Combat/Handlers/UptiltHandler
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local UptiltHandler = {}
+
+local CombatFolder = nil
+local Config = nil
+local State = nil
+local Cooldown = nil
+local Hitbox = nil
+local Remotes = nil
+local CharacterManager = nil
+local CombatLockHandler = nil
+local AerialHandler = nil
+
+local ActiveUptilts = {}
+local LastRequest = {}
+
+function UptiltHandler.Init(remotes, charManager)
+	Remotes = remotes
+	CharacterManager = charManager
+
+	CombatFolder = ReplicatedStorage:WaitForChild("Combat")
+	Config = require(CombatFolder.Config)
+	State = require(CombatFolder.Modules.StateManager)
+	Cooldown = require(CombatFolder.Modules.CooldownManager)
+	Hitbox = require(CombatFolder.Modules.HitboxHandler)
+
+	pcall(function()
+		CombatLockHandler = require(script.Parent.AttackHandler.CombatLock)
+	end)
+
+	task.defer(function()
+		pcall(function()
+			AerialHandler = require(script.Parent.AerialHandler)
+		end)
+	end)
+
+	Remotes.Uptilt.OnServerEvent:Connect(function(player)
+		UptiltHandler.OnUptilt(player)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		ActiveUptilts[player] = nil
+		LastRequest[player] = nil
+	end)
+
+	print("[UptiltHandler] Initialized")
+	return UptiltHandler
+end
+
+function UptiltHandler.CanUptilt(player)
+	local data = State.Get(player)
+	if not data then return false, "No player data" end
+
+	if not State.CanAct(player) then return false, "Cannot act" end
+	if State.IsStunned(player) then return false, "Stunned" end
+	if State.IsBlocking(player) then return false, "Blocking" end
+	if State.IsDashing(player) then return false, "Dashing" end
+	if State.IsGuardBroken(player) then return false, "Guard broken" end
+	if State.IsAirborne(player) then return false, "Already airborne" end
+
+	local charName = State.GetCharacter(player)
+	local charData = CharacterManager.Get(charName)
+	if not charData then return false, "No character data" end
+	if not charData.Uptilt then return false, "No uptilt data" end
+
+	local currentCombo = State.GetGroundCombo(player)
+	local requiredCombo = Config.Aerial and Config.Aerial.UptiltAllowedOnCombo or 3
+
+	if currentCombo < requiredCombo then
+		return false, "Combo too low"
+	end
+
+	if not Cooldown.IsReady(player, Cooldown.Actions.UPTILT) then
+		return false, "On cooldown"
+	end
+
+	return true, charData
+end
+
+function UptiltHandler.OnUptilt(player)
+	local now = tick()
+	local lastReq = LastRequest[player] or 0
+	if now - lastReq < 0.05 then return end
+	LastRequest[player] = now
+
+	local canUptilt, charDataOrReason = UptiltHandler.CanUptilt(player)
+	if not canUptilt then return end
+
+	local charData = charDataOrReason
+	local uptiltData = charData.Uptilt
+
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChild("Humanoid")
+	if not hrp or not hum then return end
+
+	local groundCombo = State.GetGroundCombo(player)
+	State.SetUptiltCombo(player, groundCombo)
+
+	local totalTime = (uptiltData.Startup or 0.05) + (uptiltData.Active or 0.10) + (uptiltData.Recovery or 0.08)
+	Cooldown.Set(player, Cooldown.Actions.UPTILT, totalTime + 0.1)
+	Cooldown.Set(player, Cooldown.Actions.M1, totalTime)
+
+	State.SetState(player, State.States.ATTACKING)
+	State.SetLastAttack(player)
+
+	Remotes.State:FireAllClients(player, "Uptilt", {
+		character = charData.Name,
+		groundCombo = groundCombo,
+	})
+
+	local uptiltId = tick()
+	ActiveUptilts[player] = uptiltId
+
+	local damage = uptiltData.Damage or 12
+	local postureDamage = uptiltData.PostureDamage or 18
+	if charData.Stats and charData.Stats.Damage then
+		damage = damage * charData.Stats.Damage
+	end
+
+	task.wait(uptiltData.Startup or 0.05)
+	if ActiveUptilts[player] ~= uptiltId then return end
+
+	local hitboxSize = uptiltData.HitboxSize or (Config.Aerial and Config.Aerial.UptiltHitbox) or Vector3.new(4, 6, 4)
+	local hitboxOffset = uptiltData.HitboxOffset or Vector3.new(0, 2, -3)
+	local hasHit = {}
+	local hitVictim = nil
+
+	local activeStart = tick()
+	local activeTime = uptiltData.Active or 0.10
+
+	while tick() - activeStart < activeTime do
+		if ActiveUptilts[player] ~= uptiltId then return end
+
+		local origin = hrp.CFrame * CFrame.new(hitboxOffset)
+
+		Hitbox.Box(origin, hitboxSize, {char}, function(victimPlayer, victimChar, victimHum, victimHrp)
+			if hasHit[victimChar] then return end
+			hasHit[victimChar] = true
+
+			UptiltHandler.ApplyUptiltHit(player, victimPlayer, victimChar, victimHum, victimHrp, {
+				damage = damage,
+				postureDamage = postureDamage,
+				launchVelocity = uptiltData.LaunchVelocity or (Config.Aerial and Config.Aerial.LaunchVelocity) or 45,
+				forwardPush = uptiltData.ForwardPush or (Config.Aerial and Config.Aerial.LaunchForwardPush) or 8,
+				hitstun = uptiltData.Hitstun or (Config.Aerial and Config.Aerial.AirTrueStunDuration) or 0.4,
+				charData = charData,
+			})
+
+			hitVictim = victimPlayer or victimChar
+		end)
+
+		task.wait()
+	end
+
+	if ActiveUptilts[player] ~= uptiltId then return end
+
+	local recovery = hitVictim and (uptiltData.RecoveryOnHit or 0.06) or (uptiltData.Recovery or 0.14)
+	State.SetState(player, State.States.RECOVERY)
+
+	task.wait(recovery)
+	if ActiveUptilts[player] ~= uptiltId then return end
+
+	if hitVictim then
+		State.SetState(player, State.States.AIRBORNE)
+		State.SetAirborne(player, true)
+		UptiltHandler.LaunchAttacker(player, hrp)
+
+		if AerialHandler then
+			AerialHandler.StartAerialCombo(player, hitVictim)
+		end
+	else
+		if State.IsRecovery(player) then
+			State.SetState(player, State.States.IDLE)
+		end
+	end
+
+	ActiveUptilts[player] = nil
+end
+
+function UptiltHandler.ApplyUptiltHit(attacker, victimPlayer, victimChar, victimHum, victimHrp, hitInfo)
+	local attackerChar = attacker.Character
+	local attackerHrp = attackerChar and attackerChar:FindFirstChild("HumanoidRootPart")
+	if not attackerHrp then return end
+
+	if victimPlayer and not State.CanBeHit(victimPlayer) then return end
+
+	if hitInfo.damage > 0 then
+		victimHum:TakeDamage(hitInfo.damage)
+	end
+
+	if victimPlayer then
+		State.DamagePosture(victimPlayer, hitInfo.postureDamage)
+		State.UpdatePressure(victimPlayer)
+	end
+
+	local launchVel = hitInfo.launchVelocity or 45
+	local forwardPush = hitInfo.forwardPush or 8
+	local launchDir = attackerHrp.CFrame.LookVector
+
+	victimHrp.AssemblyLinearVelocity = Vector3.new(
+		launchDir.X * forwardPush,
+		launchVel,
+		launchDir.Z * forwardPush
+	)
+
+	if victimPlayer then
+		State.SetState(victimPlayer, State.States.LAUNCHED)
+		State.SetAirborne(victimPlayer, true)
+		State.AddFlag(victimPlayer, State.Flags.AERIAL_LOCKED, hitInfo.hitstun + 0.5)
+		State.SetLockedBy(victimPlayer, attacker)
+		State.SetLockedTarget(attacker, victimPlayer)
+
+		if CombatLockHandler then
+			CombatLockHandler.LockPlayers(attacker, victimPlayer, (Config.CombatLock and Config.CombatLock.AerialLockDuration) or 2.0)
+		end
+	end
+
+	Remotes.Hit:FireAllClients({
+		attacker = attacker,
+		victim = victimPlayer,
+		victimChar = victimChar,
+		position = victimHrp.Position,
+		damage = hitInfo.damage,
+		hitType = "Uptilt",
+		attackDir = launchDir,
+		isLaunch = true,
+	})
+end
+
+function UptiltHandler.LaunchAttacker(player, hrp)
+	local launchVel = ((Config.Aerial and Config.Aerial.LaunchVelocity) or 45) * 0.9
+	local forwardPush = ((Config.Aerial and Config.Aerial.LaunchForwardPush) or 8) * 0.8
+	local launchDir = hrp.CFrame.LookVector
+
+	hrp.AssemblyLinearVelocity = Vector3.new(
+		launchDir.X * forwardPush,
+		launchVel,
+		launchDir.Z * forwardPush
+	)
+
+	local char = player.Character
+	if char then
+		local origGravity = workspace.Gravity
+		local bodyForce = Instance.new("BodyForce")
+		bodyForce.Name = "AerialGravityReduction"
+		bodyForce.Force = Vector3.new(0, origGravity * hrp.AssemblyMass * (1 - ((Config.Aerial and Config.Aerial.AttackerAirGravity) or 0.5)), 0)
+		bodyForce.Parent = hrp
+
+		task.delay((Config.CombatLock and Config.CombatLock.AerialLockDuration) or 2.0, function()
+			if bodyForce and bodyForce.Parent then
+				bodyForce:Destroy()
+			end
+		end)
+	end
+end
+
+function UptiltHandler.Cancel(player)
+	ActiveUptilts[player] = nil
+	if CombatLockHandler then
+		CombatLockHandler.ForceUnlock(player)
+	end
+end
+
+return UptiltHandler]]></ProtectedString>
+						<string name="ScriptGuid">{UPTILT-HANDLER-001}</string>
+						<BinaryString name="AttributesSerialize"></BinaryString>
+						<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+						<bool name="DefinesCapabilities">false</bool>
+						<UniqueId name="HistoryId">00000000000000000000000000000000</UniqueId>
+						<string name="Name">UptiltHandler</string>
+						<int64 name="SourceAssetId">-1</int64>
+						<BinaryString name="Tags"></BinaryString>
+						<UniqueId name="UniqueId">UPTILT00000000000000000000000001</UniqueId>
+					</Properties>
+				</Item>
+				<Item class="ModuleScript" referent="RBX_AERIALHANDLER_001">
+					<Properties>
+						<Content name="LinkedSource"><null></null></Content>
+						<ProtectedString name="Source"><![CDATA[--[[
+	AerialHandler.lua
+	Handles aerial combat - air M1s, downslam, and air knockback
+	Location: ServerScriptService/Combat/Handlers/AerialHandler
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local AerialHandler = {}
+
+local CombatFolder = nil
+local Config = nil
+local State = nil
+local Cooldown = nil
+local Hitbox = nil
+local Remotes = nil
+local CharacterManager = nil
+local CombatLockHandler = nil
+
+local ActiveAerials = {}
+local SpacebarHeld = {}
+
+function AerialHandler.Init(remotes, charManager)
+	Remotes = remotes
+	CharacterManager = charManager
+
+	CombatFolder = ReplicatedStorage:WaitForChild("Combat")
+	Config = require(CombatFolder.Config)
+	State = require(CombatFolder.Modules.StateManager)
+	Cooldown = require(CombatFolder.Modules.CooldownManager)
+	Hitbox = require(CombatFolder.Modules.HitboxHandler)
+
+	pcall(function()
+		CombatLockHandler = require(script.Parent.AttackHandler.CombatLock)
+	end)
+
+	local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes")
+	if not RemotesFolder:FindFirstChild("AerialInput") then
+		local aerialRemote = Instance.new("RemoteEvent")
+		aerialRemote.Name = "AerialInput"
+		aerialRemote.Parent = RemotesFolder
+	end
+
+	RemotesFolder.AerialInput.OnServerEvent:Connect(function(player, inputType, data)
+		AerialHandler.OnAerialInput(player, inputType, data)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		ActiveAerials[player] = nil
+		SpacebarHeld[player] = nil
+	end)
+
+	print("[AerialHandler] Initialized")
+	return AerialHandler
+end
+
+function AerialHandler.StartAerialCombo(attacker, victim)
+	if not attacker or not victim then return end
+
+	ActiveAerials[attacker] = {
+		id = tick(),
+		victim = victim,
+		startTime = tick(),
+		airHits = 0,
+	}
+end
+
+function AerialHandler.OnAerialInput(player, inputType, data)
+	if inputType == "SpacebarState" then
+		SpacebarHeld[player] = data
+		return
+	end
+
+	if inputType == "Attack" then
+		AerialHandler.OnAerialAttack(player)
+	end
+end
+
+function AerialHandler.OnAerialAttack(player)
+	if not State.IsAirborne(player) then return end
+	if not State.CanDoAirAttack(player) then return end
+
+	local aerial = ActiveAerials[player]
+	if not aerial then return end
+
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChild("Humanoid")
+	if not hrp or not hum then return end
+
+	local charName = State.GetCharacter(player)
+	local charData = CharacterManager.Get(charName)
+	if not charData then return end
+
+	local airHit = State.IncrementAirCombo(player)
+	aerial.airHits = airHit
+
+	local maxAirHits = State.GetMaxAirHits(player)
+	local isLastHit = airHit >= maxAirHits
+
+	State.SetState(player, State.States.AERIAL_ATTACKING)
+	State.SetLastAttack(player)
+
+	Remotes.State:FireAllClients(player, "AerialM1", {
+		character = charData.Name,
+		airHit = airHit,
+		isLastHit = isLastHit,
+	})
+
+	local startup = (Config.Aerial and Config.Aerial.AirM1Startup) or 0.06
+	local active = (Config.Aerial and Config.Aerial.AirM1Active) or 0.08
+	local recovery = (Config.Aerial and Config.Aerial.AirM1Recovery) or 0.10
+
+	Cooldown.Set(player, Cooldown.Actions.M1, startup + active + recovery)
+
+	task.wait(startup)
+	if not ActiveAerials[player] or ActiveAerials[player].id ~= aerial.id then return end
+
+	local hitboxSize = (Config.Aerial and Config.Aerial.AirM1Hitbox) or Vector3.new(5, 4, 5)
+	local hasHit = {}
+	local activeStart = tick()
+
+	while tick() - activeStart < active do
+		if not ActiveAerials[player] then return end
+
+		local origin = hrp.CFrame * CFrame.new(0, 0, -2)
+
+		Hitbox.Box(origin, hitboxSize, {char}, function(victimPlayer, victimChar, victimHum, victimHrp)
+			if hasHit[victimChar] then return end
+			hasHit[victimChar] = true
+
+			AerialHandler.ApplyAerialHit(player, victimPlayer, victimChar, victimHum, victimHrp, {
+				damage = 10 * (charData.Stats and charData.Stats.Damage or 1),
+				airHit = airHit,
+				isLastHit = isLastHit,
+			})
+		end)
+
+		task.wait()
+	end
+
+	State.SetState(player, State.States.AIRBORNE)
+	task.wait(recovery)
+
+	if isLastHit and ActiveAerials[player] then
+		AerialHandler.TriggerFinisher(player)
+	end
+end
+
+function AerialHandler.ApplyAerialHit(attacker, victimPlayer, victimChar, victimHum, victimHrp, hitInfo)
+	local attackerChar = attacker.Character
+	local attackerHrp = attackerChar and attackerChar:FindFirstChild("HumanoidRootPart")
+	if not attackerHrp then return end
+
+	if victimPlayer and not State.CanBeHit(victimPlayer) then return end
+
+	victimHum:TakeDamage(hitInfo.damage)
+
+	if victimPlayer then
+		State.SetState(victimPlayer, State.States.TRUE_STUNNED)
+		State.AddFlag(victimPlayer, State.Flags.AERIAL_LOCKED, (Config.Aerial and Config.Aerial.AirTrueStunDuration) or 0.4)
+	end
+
+	local knockbackMult = (Config.Aerial and Config.Aerial.AirKnockbackMultiplier) or 0.3
+	local kbDir = attackerHrp.CFrame.LookVector
+	victimHrp.AssemblyLinearVelocity = Vector3.new(kbDir.X * 20 * knockbackMult, 5, kbDir.Z * 20 * knockbackMult)
+
+	Remotes.Hit:FireAllClients({
+		attacker = attacker,
+		victim = victimPlayer,
+		victimChar = victimChar,
+		position = victimHrp.Position,
+		damage = hitInfo.damage,
+		hitType = "Aerial",
+		airHit = hitInfo.airHit,
+		attackDir = kbDir,
+	})
+end
+
+function AerialHandler.TriggerFinisher(player)
+	local aerial = ActiveAerials[player]
+	if not aerial then return end
+
+	task.wait(0.05)
+
+	if SpacebarHeld[player] then
+		AerialHandler.DoAirKnockback(player, aerial)
+	else
+		AerialHandler.DoDownslam(player, aerial)
+	end
+end
+
+function AerialHandler.DoDownslam(player, aerial)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local charName = State.GetCharacter(player)
+	local charData = CharacterManager.Get(charName)
+
+	State.SetState(player, State.States.AERIAL_ATTACKING)
+
+	Remotes.State:FireAllClients(player, "Downslam", { character = charName })
+
+	task.wait((Config.Aerial and Config.Aerial.DownslamStartup) or 0.08)
+	if not ActiveAerials[player] then return end
+
+	local slamVelocity = (Config.Aerial and Config.Aerial.DownslamVelocity) or 80
+	hrp.AssemblyLinearVelocity = Vector3.new(0, -slamVelocity, 0)
+
+	local hitboxSize = (Config.Aerial and Config.Aerial.DownslamHitbox) or Vector3.new(6, 8, 6)
+	local hasHit = {}
+	local activeStart = tick()
+	local landed = false
+
+	while tick() - activeStart < 2.0 and not landed do
+		if not ActiveAerials[player] then return end
+
+		local rayResult = workspace:Raycast(hrp.Position, Vector3.new(0, -3, 0))
+		if rayResult then
+			landed = true
+			break
+		end
+
+		Hitbox.Box(hrp.CFrame, hitboxSize, {char}, function(victimPlayer, victimChar, victimHum, victimHrp)
+			if hasHit[victimChar] then return end
+			hasHit[victimChar] = true
+
+			local damage = ((Config.Aerial and Config.Aerial.DownslamDamage) or 15) * (charData and charData.Stats and charData.Stats.Damage or 1)
+			victimHum:TakeDamage(damage)
+			victimHrp.AssemblyLinearVelocity = Vector3.new(0, -slamVelocity * 1.2, 0)
+
+			if victimPlayer then
+				State.RemoveFlag(victimPlayer, State.Flags.AERIAL_LOCKED)
+				State.SetAirborne(victimPlayer, false)
+			end
+
+			Remotes.Hit:FireAllClients({
+				attacker = player,
+				victim = victimPlayer,
+				victimChar = victimChar,
+				position = victimHrp.Position,
+				damage = damage,
+				hitType = "Downslam",
+			})
+		end)
+
+		task.wait()
+	end
+
+	AerialHandler.OnGroundImpact(player, char, hrp)
+end
+
+function AerialHandler.OnGroundImpact(player, char, hrp)
+	State.SetState(player, State.States.RECOVERY)
+	State.SetAirborne(player, false)
+	State.ResetAerialState(player)
+
+	Remotes.State:FireAllClients(player, "GroundImpact", {
+		position = hrp.Position,
+		radius = (Config.Aerial and Config.Aerial.DownslamGroundImpactRadius) or 5,
+	})
+
+	local impactRadius = (Config.Aerial and Config.Aerial.DownslamGroundImpactRadius) or 5
+	Hitbox.Sphere(hrp.Position, impactRadius, {char}, function(victimPlayer, victimChar, victimHum, victimHrp)
+		if victimPlayer then
+			State.SetState(victimPlayer, State.States.STUNNED)
+			task.delay((Config.Aerial and Config.Aerial.DownslamStun) or 0.6, function()
+				if State.IsStunned(victimPlayer) then
+					State.SetState(victimPlayer, State.States.IDLE)
+				end
+			end)
+		end
+		victimHrp.AssemblyLinearVelocity = Vector3.new(0, (Config.Aerial and Config.Aerial.DownslamBounce) or 10, 0)
+	end)
+
+	task.wait((Config.Aerial and Config.Aerial.DownslamRecovery) or 0.20)
+	if State.IsRecovery(player) then
+		State.SetState(player, State.States.IDLE)
+	end
+
+	State.ResetCombo(player)
+	ActiveAerials[player] = nil
+
+	if CombatLockHandler then
+		CombatLockHandler.ForceUnlock(player)
+	end
+end
+
+function AerialHandler.DoAirKnockback(player, aerial)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local charName = State.GetCharacter(player)
+	local charData = CharacterManager.Get(charName)
+
+	State.SetState(player, State.States.AERIAL_ATTACKING)
+
+	Remotes.State:FireAllClients(player, "AirKnockback", { character = charName })
+
+	task.wait((Config.Aerial and Config.Aerial.AirKnockbackStartup) or 0.06)
+	if not ActiveAerials[player] then return end
+
+	local hitboxSize = (Config.Aerial and Config.Aerial.AirKnockbackHitbox) or Vector3.new(5, 4, 6)
+	local hasHit = {}
+	local activeStart = tick()
+	local active = (Config.Aerial and Config.Aerial.AirKnockbackActive) or 0.12
+
+	while tick() - activeStart < active do
+		if not ActiveAerials[player] then return end
+
+		Hitbox.Box(hrp.CFrame * CFrame.new(0, 0, -2), hitboxSize, {char}, function(victimPlayer, victimChar, victimHum, victimHrp)
+			if hasHit[victimChar] then return end
+			hasHit[victimChar] = true
+
+			local damage = ((Config.Aerial and Config.Aerial.AirKnockbackDamage) or 12) * (charData and charData.Stats and charData.Stats.Damage or 1)
+			victimHum:TakeDamage(damage)
+
+			local kbDistance = (Config.Aerial and Config.Aerial.AirKnockbackDistance) or 60
+			local kbLift = (Config.Aerial and Config.Aerial.AirKnockbackLift) or 15
+			local kbDir = hrp.CFrame.LookVector
+
+			victimHrp.AssemblyLinearVelocity = Vector3.new(kbDir.X * kbDistance, kbLift, kbDir.Z * kbDistance)
+
+			if victimPlayer then
+				State.RemoveFlag(victimPlayer, State.Flags.AERIAL_LOCKED)
+				State.SetAirborne(victimPlayer, false)
+				State.SetState(victimPlayer, State.States.STUNNED)
+				task.delay((Config.Aerial and Config.Aerial.AirKnockbackStun) or 0.5, function()
+					if State.IsStunned(victimPlayer) then
+						State.SetState(victimPlayer, State.States.IDLE)
+					end
+				end)
+			end
+
+			Remotes.Hit:FireAllClients({
+				attacker = player,
+				victim = victimPlayer,
+				victimChar = victimChar,
+				position = victimHrp.Position,
+				damage = damage,
+				hitType = "AirKnockback",
+				attackDir = kbDir,
+			})
+		end)
+
+		task.wait()
+	end
+
+	AerialHandler.EndAerialCombo(player)
+end
+
+function AerialHandler.EndAerialCombo(player)
+	State.SetState(player, State.States.RECOVERY)
+	State.SetAirborne(player, false)
+	State.ResetAerialState(player)
+
+	task.wait((Config.Aerial and Config.Aerial.AirKnockbackRecovery) or 0.15)
+
+	if State.IsRecovery(player) then
+		State.SetState(player, State.States.IDLE)
+	end
+
+	State.ResetCombo(player)
+	ActiveAerials[player] = nil
+
+	if CombatLockHandler then
+		CombatLockHandler.ForceUnlock(player)
+	end
+end
+
+function AerialHandler.Cancel(player)
+	ActiveAerials[player] = nil
+	State.ResetAerialState(player)
+	if CombatLockHandler then
+		CombatLockHandler.ForceUnlock(player)
+	end
+end
+
+function AerialHandler.IsInAerialCombo(player)
+	return ActiveAerials[player] ~= nil
+end
+
+return AerialHandler]]></ProtectedString>
+						<string name="ScriptGuid">{AERIAL-HANDLER-001}</string>
+						<BinaryString name="AttributesSerialize"></BinaryString>
+						<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+						<bool name="DefinesCapabilities">false</bool>
+						<UniqueId name="HistoryId">00000000000000000000000000000000</UniqueId>
+						<string name="Name">AerialHandler</string>
+						<int64 name="SourceAssetId">-1</int64>
+						<BinaryString name="Tags"></BinaryString>
+						<UniqueId name="UniqueId">AERIAL00000000000000000000000001</UniqueId>
 					</Properties>
 				</Item>
 				<Item class="ModuleScript" referent="RBX26869BECCD4A4BAF99712A24FA9E8731">
