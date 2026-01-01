@@ -45,12 +45,14 @@ end
 
 -- Load handlers
 local Attack = require(script.Parent.Attack)
+local Uptilt = require(script.Parent.Uptilt)
 local Block = require(script.Parent.Block)
 local Dash = require(script.Parent.Dash)
 local Ability = require(script.Parent.Ability)
 local Passive = require(script.Parent.Passive)
 
 Attack.Init(Remotes, Registry)
+Uptilt.Init(Remotes, Registry)
 Block.Init(Remotes, Registry)
 Dash.Init(Remotes, Registry)
 Ability.Init(Remotes, Registry)
