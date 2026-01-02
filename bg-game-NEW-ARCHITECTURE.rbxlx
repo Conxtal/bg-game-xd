@@ -1,0 +1,1837 @@
+<roblox version="4">
+	<Item class="Workspace">
+		<Properties>
+			<string name="Name">Workspace</string>
+		</Properties>
+		<Item class="Part">
+			<Properties>
+				<bool name="Anchored">true</bool>
+				<CoordinateFrame name="CFrame">
+					<X>0</X><Y>-8</Y><Z>0</Z>
+					<R00>1</R00><R01>0</R01><R02>0</R02>
+					<R10>0</R10><R11>1</R11><R12>0</R12>
+					<R20>0</R20><R21>0</R21><R22>1</R22>
+				</CoordinateFrame>
+				<Color3uint8 name="Color3uint8">4284177243</Color3uint8>
+				<token name="Material">816</token>
+				<Vector3 name="size">
+					<X>2048</X><Y>16</Y><Z>2048</Z>
+				</Vector3>
+				<string name="Name">Baseplate</string>
+			</Properties>
+		</Item>
+	</Item>
+	<Item class="ReplicatedStorage">
+		<Properties>
+			<string name="Name">ReplicatedStorage</string>
+		</Properties>
+		<Item class="ModuleScript">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+	Config.lua
+	Central combat configuration
+	Location: ReplicatedStorage
+]]
+
+local Config = {}
+
+-- Stamina
+Config.Stamina = {
+	Max = 100,
+	RegenRate = 20,
+	RegenDelay = 0.8,
+}
+
+-- Player defaults
+Config.Player = {
+	WalkSpeed = 16,
+	JumpPower = 50,
+}
+
+-- Combat
+Config.Combat = {
+	M1Cooldown = 0.4,
+	DashCooldown = 1.0,
+	BlockCooldown = 0.3,
+	UptiltCooldown = 0.6,
+
+	-- Posture system
+	Posture = {
+		Max = 100,
+		RegenRate = 15,
+		RegenDelay = 2.0,
+		DecayWhenBlocking = 10,
+		GuardBreakThreshold = 100,
+	},
+}
+
+-- Hitbox
+Config.Hitbox = {
+	MaxDistance = 10,
+	DebugVisualization = false,
+}
+
+return Config
+]]></ProtectedString>
+				<string name="Name">Config</string>
+			</Properties>
+		</Item>
+		<Item class="Folder">
+			<Properties>
+				<string name="Name">Utils</string>
+			</Properties>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	Signal.lua
+	Custom event system - better than BindableEvents
+
+	Usage:
+		local signal = Signal.new()
+		local conn = signal:Connect(function(...) end)
+		signal:Fire(...)
+		conn:Disconnect()
+		signal:Destroy()
+]]
+
+local Signal = {}
+Signal.__index = Signal
+
+function Signal.new()
+	local self = setmetatable({}, Signal)
+	self._connections = {}
+	self._firing = false
+	return self
+end
+
+function Signal:Connect(callback)
+	assert(type(callback) == "function", "Callback must be a function")
+
+	local connection = {
+		Connected = true,
+		_signal = self,
+		_callback = callback
+	}
+
+	function connection:Disconnect()
+		if not self.Connected then return end
+		self.Connected = false
+
+		local connections = self._signal._connections
+		local index = table.find(connections, self)
+		if index then
+			table.remove(connections, index)
+		end
+	end
+
+	table.insert(self._connections, connection)
+	return connection
+end
+
+function Signal:Fire(...)
+	if self._firing then
+		warn("[Signal] Recursive fire detected")
+		return
+	end
+
+	self._firing = true
+
+	-- Copy connections to avoid issues if disconnected during fire
+	local connections = table.clone(self._connections)
+
+	for _, conn in ipairs(connections) do
+		if conn.Connected then
+			task.spawn(conn._callback, ...)
+		end
+	end
+
+	self._firing = false
+end
+
+function Signal:Wait()
+	local thread = coroutine.running()
+	local conn
+
+	conn = self:Connect(function(...)
+		conn:Disconnect()
+		task.spawn(thread, ...)
+	end)
+
+	return coroutine.yield()
+end
+
+function Signal:Destroy()
+	for _, conn in ipairs(self._connections) do
+		conn:Disconnect()
+	end
+	table.clear(self._connections)
+end
+
+return Signal
+]]></ProtectedString>
+					<string name="Name">Signal</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	Maid.lua
+	Resource cleanup manager
+
+	Usage:
+		local maid = Maid.new()
+		maid:Add(connection)
+		maid:Add(instance)
+		maid:Add(function() ... end)
+		maid:Cleanup()
+]]
+
+local Maid = {}
+Maid.__index = Maid
+
+function Maid.new()
+	return setmetatable({
+		_tasks = {}
+	}, Maid)
+end
+
+function Maid:Add(task)
+	assert(task ~= nil, "Task cannot be nil")
+	table.insert(self._tasks, task)
+	return task
+end
+
+function Maid:Remove(task)
+	local index = table.find(self._tasks, task)
+	if index then
+		table.remove(self._tasks, index)
+	end
+end
+
+function Maid:Cleanup()
+	for _, task in ipairs(self._tasks) do
+		if type(task) == "function" then
+			task()
+		elseif typeof(task) == "RBXScriptConnection" then
+			task:Disconnect()
+		elseif typeof(task) == "Instance" then
+			task:Destroy()
+		elseif type(task) == "table" and task.Destroy then
+			task:Destroy()
+		elseif type(task) == "table" and task.Disconnect then
+			task:Disconnect()
+		end
+	end
+	table.clear(self._tasks)
+end
+
+function Maid:Destroy()
+	self:Cleanup()
+end
+
+return Maid
+]]></ProtectedString>
+					<string name="Name">Maid</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	TableUtil.lua
+	Table utility functions
+]]
+
+local TableUtil = {}
+
+function TableUtil.DeepCopy(tbl)
+	if type(tbl) ~= "table" then
+		return tbl
+	end
+
+	local copy = {}
+	for key, value in pairs(tbl) do
+		copy[TableUtil.DeepCopy(key)] = TableUtil.DeepCopy(value)
+	end
+
+	return setmetatable(copy, getmetatable(tbl))
+end
+
+function TableUtil.Merge(target, source)
+	for key, value in pairs(source) do
+		if type(value) == "table" and type(target[key]) == "table" then
+			TableUtil.Merge(target[key], value)
+		else
+			target[key] = value
+		end
+	end
+	return target
+end
+
+function TableUtil.Count(tbl)
+	local count = 0
+	for _ in pairs(tbl) do
+		count = count + 1
+	end
+	return count
+end
+
+function TableUtil.Clear(tbl)
+	for key in pairs(tbl) do
+		tbl[key] = nil
+	end
+end
+
+function TableUtil.Find(tbl, value)
+	for key, val in pairs(tbl) do
+		if val == value then
+			return key
+		end
+	end
+	return nil
+end
+
+function TableUtil.Map(tbl, func)
+	local result = {}
+	for key, value in pairs(tbl) do
+		result[key] = func(value, key)
+	end
+	return result
+end
+
+function TableUtil.Filter(tbl, predicate)
+	local result = {}
+	for key, value in pairs(tbl) do
+		if predicate(value, key) then
+			result[key] = value
+		end
+	end
+	return result
+end
+
+return TableUtil
+]]></ProtectedString>
+					<string name="Name">TableUtil</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	MathUtil.lua
+	Math utility functions
+]]
+
+local MathUtil = {}
+
+function MathUtil.Lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+function MathUtil.Clamp(value, min, max)
+	return math.max(min, math.min(max, value))
+end
+
+function MathUtil.Round(value, decimals)
+	local mult = 10 ^ (decimals or 0)
+	return math.floor(value * mult + 0.5) / mult
+end
+
+function MathUtil.Sign(value)
+	return value > 0 and 1 or value < 0 and -1 or 0
+end
+
+function MathUtil.Map(value, inMin, inMax, outMin, outMax)
+	return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin
+end
+
+function MathUtil.InverseLerp(a, b, value)
+	return (value - a) / (b - a)
+end
+
+function MathUtil.SmoothStep(edge0, edge1, x)
+	local t = MathUtil.Clamp((x - edge0) / (edge1 - edge0), 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+return MathUtil
+]]></ProtectedString>
+					<string name="Name">MathUtil</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	Utils loader
+]]
+
+local Utils = {
+	Signal = require(script.Signal),
+	Maid = require(script.Maid),
+	TableUtil = require(script.TableUtil),
+	MathUtil = require(script.MathUtil),
+}
+
+return Utils
+]]></ProtectedString>
+					<string name="Name">init</string>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Folder">
+			<Properties>
+				<string name="Name">States</string>
+			</Properties>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	StateService.lua
+	Core state machine - enforces exclusive states with proper enter/update/exit
+
+	Primary States (EXCLUSIVE - only ONE active):
+	- Grounded, Airborne, Stunned, Ragdoll
+
+	Sub-States (MODIFIERS - can have multiple):
+	- Combat, Blocking, Dashing
+]]
+
+local RunService = game:GetService("RunService")
+
+local StateService = {}
+
+-- Player data storage
+local PlayerData = {}
+local UpdateConnection = nil
+
+-- State references (injected during Init)
+local States = {}
+
+-- Constants
+StateService.PRIMARY_STATES = {
+	GROUNDED = "Grounded",
+	AIRBORNE = "Airborne",
+	STUNNED = "Stunned",
+	RAGDOLL = "Ragdoll",
+}
+
+StateService.SUB_STATES = {
+	COMBAT = "Combat",
+	BLOCKING = "Blocking",
+	DASHING = "Dashing",
+}
+
+function StateService.Init(stateModules)
+	States = stateModules
+
+	-- Start update loop
+	if not UpdateConnection then
+		UpdateConnection = RunService.Heartbeat:Connect(function(dt)
+			StateService.Update(dt)
+		end)
+	end
+
+	print("[StateService] Initialized")
+end
+
+function StateService.Setup(player)
+	if PlayerData[player] then
+		warn("[StateService] Player already setup:", player.Name)
+		return
+	end
+
+	PlayerData[player] = {
+		-- State
+		currentState = nil,
+		subStates = {},
+
+		-- Character
+		character = "Arthur",
+
+		-- Combat
+		combo = 0,
+		lastAttack = 0,
+
+		-- Resources
+		stamina = 100,
+		lastStaminaUse = 0,
+		posture = 0,
+		lastPostureHit = 0,
+
+		-- Flags
+		blocking = false,
+		awakened = false,
+
+		-- Timestamps
+		stateEnterTime = 0,
+	}
+
+	-- Start in Grounded state
+	StateService.Transition(player, StateService.PRIMARY_STATES.GROUNDED)
+
+	print("[StateService] Setup player:", player.Name)
+end
+
+function StateService.Cleanup(player)
+	if not PlayerData[player] then return end
+
+	-- Exit current state
+	local data = PlayerData[player]
+	if data.currentState and States[data.currentState] then
+		local state = States[data.currentState]
+		if state.Exit then
+			state.Exit(player, data)
+		end
+	end
+
+	PlayerData[player] = nil
+	print("[StateService] Cleaned up player:", player.Name)
+end
+
+function StateService.Get(player)
+	return PlayerData[player]
+end
+
+function StateService.GetAll()
+	return PlayerData
+end
+
+-- Transition to new primary state
+function StateService.Transition(player, newStateName, transitionData)
+	local data = PlayerData[player]
+	if not data then
+		warn("[StateService] No data for player:", player.Name)
+		return false
+	end
+
+	local newState = States[newStateName]
+	if not newState then
+		warn("[StateService] State not found:", newStateName)
+		return false
+	end
+
+	local currentStateName = data.currentState
+	local currentState = currentStateName and States[currentStateName]
+
+	-- Check if transition is allowed
+	if currentState and currentState.CanTransitionTo then
+		local canTransition = currentState.CanTransitionTo[newStateName]
+		if canTransition ~= nil then
+			if type(canTransition) == "function" then
+				if not canTransition(player, data) then
+					return false
+				end
+			elseif not canTransition then
+				return false
+			end
+		end
+	end
+
+	-- Exit current state
+	if currentState and currentState.Exit then
+		currentState.Exit(player, data)
+	end
+
+	-- Change state
+	data.currentState = newStateName
+	data.stateEnterTime = tick()
+
+	-- Enter new state
+	if newState.Enter then
+		newState.Enter(player, data, transitionData)
+	end
+
+	return true
+end
+
+-- Get current primary state name
+function StateService.GetState(player)
+	local data = PlayerData[player]
+	return data and data.currentState or nil
+end
+
+-- Check if in specific state
+function StateService.IsInState(player, stateName)
+	local data = PlayerData[player]
+	return data and data.currentState == stateName
+end
+
+-- Sub-state management
+function StateService.AddSubState(player, subState)
+	local data = PlayerData[player]
+	if not data then return end
+
+	if not table.find(data.subStates, subState) then
+		table.insert(data.subStates, subState)
+	end
+end
+
+function StateService.RemoveSubState(player, subState)
+	local data = PlayerData[player]
+	if not data then return end
+
+	local index = table.find(data.subStates, subState)
+	if index then
+		table.remove(data.subStates, index)
+	end
+end
+
+function StateService.HasSubState(player, subState)
+	local data = PlayerData[player]
+	if not data then return false end
+
+	return table.find(data.subStates, subState) ~= nil
+end
+
+function StateService.ClearSubStates(player)
+	local data = PlayerData[player]
+	if not data then return end
+
+	table.clear(data.subStates)
+end
+
+-- Update loop - calls Update on current state
+function StateService.Update(dt)
+	for player, data in pairs(PlayerData) do
+		if data.currentState then
+			local state = States[data.currentState]
+			if state and state.Update then
+				state.Update(player, data, dt)
+			end
+		end
+	end
+end
+
+return StateService
+]]></ProtectedString>
+					<string name="Name">StateService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	GroundedState.lua
+	Normal grounded movement and combat state
+]]
+
+local GroundedState = {}
+
+function GroundedState.Enter(player, data, transitionData)
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		-- Restore normal movement
+		humanoid.WalkSpeed = 16
+		humanoid.AutoRotate = true
+	end
+
+	-- Reset air flags
+	data.airJumps = 0
+	data.isGrounded = true
+end
+
+function GroundedState.Update(player, data, dt)
+	local char = player.Character
+	if not char then return end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- Check if still grounded (simple raycast downward)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {char}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local ray = workspace:Raycast(hrp.Position, Vector3.new(0, -4, 0), rayParams)
+
+	if not ray then
+		-- No longer grounded - transition to airborne
+		local StateService = require(script.Parent.StateService)
+		StateService.Transition(player, StateService.PRIMARY_STATES.AIRBORNE)
+		return
+	end
+
+	-- Stamina regen (if not using)
+	if tick() - data.lastStaminaUse > 0.8 then
+		data.stamina = math.min(100, data.stamina + 20 * dt)
+	end
+
+	-- Posture regen (if not being hit)
+	if tick() - data.lastPostureHit > 2.0 then
+		data.posture = math.max(0, data.posture - 15 * dt)
+	end
+
+	-- Combo timeout
+	if tick() - data.lastAttack > 0.5 then
+		data.combo = 0
+	end
+end
+
+function GroundedState.Exit(player, data)
+	-- Clean up any grounded-specific state
+end
+
+-- Transition rules
+GroundedState.CanTransitionTo = {
+	Airborne = true, -- Can go airborne
+	Stunned = true, -- Can be stunned
+	Ragdoll = true, -- Can be ragdolled
+}
+
+return GroundedState
+]]></ProtectedString>
+					<string name="Name">GroundedState</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	AirborneState.lua
+	In-air state - reduced control, aerial attacks enabled
+]]
+
+local AirborneState = {}
+
+function AirborneState.Enter(player, data, transitionData)
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		-- Reduced air control
+		humanoid.WalkSpeed = 8
+		humanoid.AutoRotate = false
+	end
+
+	-- Set air flags
+	data.isGrounded = false
+	data.launchSource = transitionData and transitionData.source
+
+	-- If launched into air during combat, maintain combat sub-state
+	if transitionData and transitionData.maintainCombat then
+		local StateService = require(script.Parent.StateService)
+		StateService.AddSubState(player, StateService.SUB_STATES.COMBAT)
+	end
+end
+
+function AirborneState.Update(player, data, dt)
+	local char = player.Character
+	if not char then return end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- Check if landed (raycast downward)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {char}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local ray = workspace:Raycast(hrp.Position, Vector3.new(0, -4, 0), rayParams)
+
+	if ray and hrp.AssemblyLinearVelocity.Y <= 1 then
+		-- Landed - transition to grounded
+		local StateService = require(script.Parent.StateService)
+		StateService.Transition(player, StateService.PRIMARY_STATES.GROUNDED)
+		return
+	end
+
+	-- Apply modified gravity if in aerial combat
+	local StateService = require(script.Parent.StateService)
+	if StateService.HasSubState(player, StateService.SUB_STATES.COMBAT) then
+		-- Reduced gravity during aerial combat
+		local currentVel = hrp.AssemblyLinearVelocity
+		if currentVel.Y < 0 then
+			-- Slow down fall
+			hrp.AssemblyLinearVelocity = Vector3.new(
+				currentVel.X,
+				currentVel.Y * 0.7, -- Reduce downward velocity
+				currentVel.Z
+			)
+		end
+	end
+
+	-- Aerial combo timeout
+	if tick() - data.lastAttack > 0.4 then
+		data.combo = 0
+	end
+end
+
+function AirborneState.Exit(player, data)
+	-- Clear aerial flags
+	data.launchSource = nil
+
+	-- Clear combat sub-state if still active
+	local StateService = require(script.Parent.StateService)
+	StateService.RemoveSubState(player, StateService.SUB_STATES.COMBAT)
+end
+
+-- Transition rules
+AirborneState.CanTransitionTo = {
+	Grounded = true, -- Can land
+	Stunned = true, -- Can be stunned in air
+	Ragdoll = true, -- Can be ragdolled in air
+}
+
+return AirborneState
+]]></ProtectedString>
+					<string name="Name">AirborneState</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	StunnedState.lua
+	Hitstun - frozen, no input
+]]
+
+local StunnedState = {}
+
+function StunnedState.Enter(player, data, transitionData)
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		-- Disable movement during stun
+		humanoid.WalkSpeed = 0
+		humanoid.AutoRotate = false
+	end
+
+	-- Set stun duration
+	data.stunDuration = transitionData and transitionData.duration or 0.35
+	data.stunEndTime = tick() + data.stunDuration
+	data.wasAirborne = transitionData and transitionData.wasAirborne or false
+end
+
+function StunnedState.Update(player, data, dt)
+	-- Wait for stun to end
+	if tick() >= data.stunEndTime then
+		-- Stun over - transition back
+		local StateService = require(script.Parent.StateService)
+
+		-- If was in air, go back to airborne, else grounded
+		if data.wasAirborne then
+			StateService.Transition(player, StateService.PRIMARY_STATES.AIRBORNE)
+		else
+			StateService.Transition(player, StateService.PRIMARY_STATES.GROUNDED)
+		end
+	end
+end
+
+function StunnedState.Exit(player, data)
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		-- Restore movement
+		humanoid.WalkSpeed = 16
+		humanoid.AutoRotate = true
+	end
+
+	-- Clear stun data
+	data.stunDuration = nil
+	data.stunEndTime = nil
+	data.wasAirborne = nil
+end
+
+-- Transition rules
+StunnedState.CanTransitionTo = {
+	Grounded = true, -- After stun
+	Airborne = true, -- After stun in air
+	Ragdoll = true, -- Can be launched hard during stun
+}
+
+return StunnedState
+]]></ProtectedString>
+					<string name="Name">StunnedState</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	States loader
+]]
+
+local States = {
+	StateService = require(script.StateService),
+	Grounded = require(script.GroundedState),
+	Airborne = require(script.AirborneState),
+	Stunned = require(script.StunnedState),
+}
+
+return States
+]]></ProtectedString>
+					<string name="Name">init</string>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Folder">
+			<Properties>
+				<string name="Name">Combat</string>
+			</Properties>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	HitboxService.lua
+	Hitbox detection abstraction
+]]
+
+local HitboxService = {}
+
+function HitboxService.Init()
+	print("[HitboxService] Initialized")
+end
+
+local function GetCharacterFromPart(part)
+	local current = part
+	while current do
+		local humanoid = current:FindFirstChildOfClass("Humanoid")
+		local hrp = current:FindFirstChild("HumanoidRootPart")
+		if humanoid and hrp then
+			return current, humanoid, hrp
+		end
+		current = current.Parent
+	end
+	return nil, nil, nil
+end
+
+local function GetPlayerFromCharacter(character)
+	local Players = game:GetService("Players")
+	for _, player in pairs(Players:GetPlayers()) do
+		if player.Character == character then
+			return player
+		end
+	end
+	return nil
+end
+
+function HitboxService.CreateBox(origin, size, direction, distance, filter)
+	local params = OverlapParams.new()
+	params.FilterDescendantsInstances = filter or {}
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local cframe = CFrame.new(origin, origin + direction) * CFrame.new(0, 0, -distance/2)
+	return workspace:GetPartBoundsInBox(cframe, size, params)
+end
+
+function HitboxService.CreateSphere(origin, radius, filter)
+	local params = OverlapParams.new()
+	params.FilterDescendantsInstances = filter or {}
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	return workspace:GetPartBoundsInRadius(origin, radius, params)
+end
+
+function HitboxService.ProcessHits(parts, attacker)
+	local results = {}
+	local seen = {}
+
+	for _, part in pairs(parts) do
+		local char, hum, hrp = GetCharacterFromPart(part)
+		if char and hum and hum.Health > 0 then
+			if not seen[char] then
+				seen[char] = true
+
+				local player = GetPlayerFromCharacter(char)
+
+				-- Skip if hitting self
+				if player ~= attacker then
+					table.insert(results, {
+						character = char,
+						humanoid = hum,
+						rootPart = hrp,
+						player = player,
+						part = part,
+					})
+				end
+			end
+		end
+	end
+
+	return results
+end
+
+-- Multi-frame detection for active hitbox windows
+function HitboxService.DetectMultiFrame(hitboxFunc, duration)
+	local hits = {}
+	local seen = {}
+	local startTime = tick()
+
+	task.spawn(function()
+		while tick() - startTime < duration do
+			local parts = hitboxFunc()
+			for _, part in pairs(parts) do
+				local char = GetCharacterFromPart(part)
+				if char and not seen[char] then
+					seen[char] = true
+					table.insert(hits, part)
+				end
+			end
+			task.wait()
+		end
+	end)
+
+	return hits, seen
+end
+
+return HitboxService
+]]></ProtectedString>
+					<string name="Name">HitboxService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	DamageService.lua
+	Damage calculation with all modifiers
+]]
+
+local DamageService = {}
+
+local StateService = nil
+
+function DamageService.Init(dependencies)
+	StateService = dependencies.StateService
+	print("[DamageService] Initialized")
+end
+
+function DamageService.Calculate(attacker, victim, baseDamage, damageData)
+	local attackerData = StateService.Get(attacker)
+	local victimData = StateService.Get(victim)
+
+	if not attackerData or not victimData then
+		return baseDamage
+	end
+
+	local finalDamage = baseDamage
+
+	-- Attacker modifiers
+	if damageData then
+		-- Character stat multiplier
+		if damageData.statMultiplier then
+			finalDamage = finalDamage * damageData.statMultiplier
+		end
+
+		-- Passive bonus
+		if damageData.passiveBonus then
+			finalDamage = finalDamage * damageData.passiveBonus
+		end
+
+		-- Awakening multiplier
+		if attackerData.awakened and damageData.awakeningMultiplier then
+			finalDamage = finalDamage * damageData.awakeningMultiplier
+		end
+	end
+
+	-- Victim modifiers
+	if victimData.blocking and damageData and damageData.blockReduction then
+		finalDamage = finalDamage * (1 - damageData.blockReduction)
+	end
+
+	return math.floor(finalDamage + 0.5)
+end
+
+function DamageService.Apply(victim, damage, source)
+	local char = victim.Character
+	if not char then return false end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return false end
+
+	humanoid:TakeDamage(damage)
+	return true
+end
+
+return DamageService
+]]></ProtectedString>
+					<string name="Name">DamageService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	StunService.lua
+	Hitstun management
+]]
+
+local StunService = {}
+
+local StateService = nil
+
+function StunService.Init(dependencies)
+	StateService = dependencies.StateService
+	print("[StunService] Initialized")
+end
+
+-- Stun types
+StunService.TYPES = {
+	HIT = "Hit",
+	BLOCK = "Block",
+	COUNTER = "Counter",
+	LAUNCH = "Launch",
+}
+
+function StunService.ApplyHitstun(victim, duration, stunType, customData)
+	local data = StateService.Get(victim)
+	if not data then return false end
+
+	-- Determine if victim was airborne
+	local wasAirborne = StateService.IsInState(victim, StateService.PRIMARY_STATES.AIRBORNE)
+
+	-- Transition to stunned state
+	return StateService.Transition(victim, StateService.PRIMARY_STATES.STUNNED, {
+		duration = duration,
+		stunType = stunType,
+		wasAirborne = wasAirborne,
+		customData = customData,
+	})
+end
+
+function StunService.IsStunned(player)
+	return StateService.IsInState(player, StateService.PRIMARY_STATES.STUNNED)
+end
+
+function StunService.GetStunRemaining(player)
+	local data = StateService.Get(player)
+	if not data or not data.stunEndTime then return 0 end
+
+	return math.max(0, data.stunEndTime - tick())
+end
+
+return StunService
+]]></ProtectedString>
+					<string name="Name">StunService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	IFrameService.lua
+	Invulnerability frame management
+]]
+
+local IFrameService = {}
+
+local ActiveIFrames = {}
+
+function IFrameService.Init()
+	print("[IFrameService] Initialized")
+end
+
+function IFrameService.Grant(player, duration)
+	if not player or not player.Character then return end
+
+	local endTime = tick() + duration
+	ActiveIFrames[player] = endTime
+
+	-- Auto-cleanup after duration
+	task.delay(duration, function()
+		if ActiveIFrames[player] == endTime then
+			ActiveIFrames[player] = nil
+		end
+	end)
+end
+
+function IFrameService.Has(player)
+	if not ActiveIFrames[player] then return false end
+
+	if tick() >= ActiveIFrames[player] then
+		ActiveIFrames[player] = nil
+		return false
+	end
+
+	return true
+end
+
+function IFrameService.GetRemaining(player)
+	if not ActiveIFrames[player] then return 0 end
+
+	local remaining = ActiveIFrames[player] - tick()
+	if remaining <= 0 then
+		ActiveIFrames[player] = nil
+		return 0
+	end
+
+	return remaining
+end
+
+function IFrameService.Remove(player)
+	ActiveIFrames[player] = nil
+end
+
+function IFrameService.Cleanup(player)
+	ActiveIFrames[player] = nil
+end
+
+return IFrameService
+]]></ProtectedString>
+					<string name="Name">IFrameService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	HitstopService.lua
+	Brief freeze on hit for impact feel
+]]
+
+local HitstopService = {}
+
+function HitstopService.Init()
+	print("[HitstopService] Initialized")
+end
+
+function HitstopService.Apply(attacker, victim, duration)
+	-- Freeze both attacker and victim briefly
+	HitstopService.FreezeCharacter(attacker, duration)
+	HitstopService.FreezeCharacter(victim, duration)
+end
+
+function HitstopService.FreezeCharacter(player, duration)
+	if not player or not player.Character then return end
+
+	local char = player.Character
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+
+	if not hrp or not humanoid then return end
+
+	-- Store velocity
+	local storedVelocity = hrp.AssemblyLinearVelocity
+	local storedWalkSpeed = humanoid.WalkSpeed
+
+	-- Freeze
+	hrp.Anchored = true
+	humanoid.WalkSpeed = 0
+
+	-- Unfreeze after duration
+	task.delay(duration, function()
+		if hrp and hrp.Parent then
+			hrp.Anchored = false
+			hrp.AssemblyLinearVelocity = storedVelocity
+		end
+		if humanoid and humanoid.Parent then
+			humanoid.WalkSpeed = storedWalkSpeed
+		end
+	end)
+end
+
+return HitstopService
+]]></ProtectedString>
+					<string name="Name">HitstopService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	CombatService.lua
+	Main combat orchestrator - handles M1, Uptilt, aerial combat
+
+	SERVER AUTHORITY ONLY
+]]
+
+local CombatService = {}
+
+-- Dependencies (injected)
+local StateService, HitboxService, DamageService, StunService, IFrameService, HitstopService
+local CharacterService, CombatLockService
+
+-- State
+local ActiveAttacks = {}
+local CooldownService = {} -- Simple internal cooldowns
+
+function CombatService.Init(dependencies)
+	StateService = dependencies.StateService
+	HitboxService = dependencies.HitboxService
+	DamageService = dependencies.DamageService
+	StunService = dependencies.StunService
+	IFrameService = dependencies.IFrameService
+	HitstopService = dependencies.HitstopService
+	CharacterService = dependencies.CharacterService
+	CombatLockService = dependencies.CombatLockService
+
+	print("[CombatService] Initialized")
+end
+
+-- M1 Attack
+function CombatService.ProcessM1(player)
+	local data = StateService.Get(player)
+	if not data then return false end
+
+	-- Must be grounded or airborne (not stunned)
+	local state = StateService.GetState(player)
+	if state ~= StateService.PRIMARY_STATES.GROUNDED and state ~= StateService.PRIMARY_STATES.AIRBORNE then
+		return false
+	end
+
+	-- Check blocking
+	if StateService.HasSubState(player, StateService.SUB_STATES.BLOCKING) then
+		return false
+	end
+
+	-- Check cooldown
+	if not CombatService.IsReady(player, "M1") then
+		return false
+	end
+
+	-- Get character data
+	local charData = CharacterService.Get(player)
+	if not charData or not charData.M1 then return false end
+
+	-- Combo logic
+	local timeSinceAttack = tick() - data.lastAttack
+	if timeSinceAttack > charData.M1.ComboWindow then
+		data.combo = 0
+	end
+
+	-- Check max combo
+	if data.combo >= charData.M1.MaxCombo then
+		return false
+	end
+
+	-- Increment combo
+	data.combo = data.combo + 1
+	data.lastAttack = tick()
+
+	local hitData = charData.M1.Hits[data.combo]
+	if not hitData then
+		data.combo = 0
+		return false
+	end
+
+	-- Set cooldown
+	local totalTime = hitData.startup + hitData.active + hitData.recovery
+	CombatService.SetCooldown(player, "M1", totalTime)
+
+	-- Add combat sub-state
+	StateService.AddSubState(player, StateService.SUB_STATES.COMBAT)
+
+	-- Execute attack
+	task.spawn(function()
+		CombatService.ExecuteM1(player, data.combo, hitData, charData)
+	end)
+
+	return true
+end
+
+function CombatService.ExecuteM1(player, combo, hitData, charData)
+	local char = player.Character
+	if not char then return end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- Startup
+	task.wait(hitData.startup)
+
+	-- Active hitbox window
+	local direction = hrp.CFrame.LookVector
+	local hits = {}
+	local activeStart = tick()
+
+	while tick() - activeStart < hitData.active do
+		local parts = HitboxService.CreateBox(
+			hrp.Position,
+			charData.M1.HitboxSize or Vector3.new(4, 4, 5),
+			direction,
+			10,
+			{char}
+		)
+
+		local results = HitboxService.ProcessHits(parts, player)
+		for _, hit in ipairs(results) do
+			if not hits[hit.character] and hit.player then
+				hits[hit.character] = true
+				CombatService.ProcessHit(player, hit.player, hitData, charData, direction)
+			end
+		end
+
+		task.wait()
+	end
+
+	-- Recovery
+	task.wait(hitData.recovery)
+
+	-- Remove combat sub-state if combo ended
+	local data = StateService.Get(player)
+	if data and tick() - data.lastAttack > 0.3 then
+		StateService.RemoveSubState(player, StateService.SUB_STATES.COMBAT)
+		data.combo = 0
+	end
+end
+
+function CombatService.ProcessHit(attacker, victim, hitData, charData, direction)
+	-- Check i-frames
+	if IFrameService.Has(victim) then return end
+
+	local victimChar = victim.Character
+	if not victimChar then return end
+
+	local victimHRP = victimChar:FindFirstChild("HumanoidRootPart")
+	if not victimHRP then return end
+
+	-- Calculate damage
+	local damage = DamageService.Calculate(attacker, victim, hitData.damage, {
+		statMultiplier = charData.Stats.Damage or 1,
+	})
+
+	-- Apply damage
+	DamageService.Apply(victim, damage, attacker)
+
+	-- Apply knockback
+	local knockbackVel = direction * (hitData.knockback or 50)
+	if hitData.lift then
+		knockbackVel = knockbackVel + Vector3.new(0, hitData.lift, 0)
+	end
+	victimHRP.AssemblyLinearVelocity = knockbackVel
+
+	-- Apply hitstun
+	StunService.ApplyHitstun(victim, charData.M1.Hitstun or 0.35, StunService.TYPES.HIT)
+
+	-- Hitstop for impact feel
+	HitstopService.Apply(attacker, victim, 0.05)
+
+	-- Combat lock (lock to first hit)
+	if CombatLockService then
+		CombatLockService.LockToTarget(attacker, victim, 1.0)
+	end
+end
+
+-- Simple cooldown system
+function CombatService.SetCooldown(player, action, duration)
+	CooldownService[player] = CooldownService[player] or {}
+	CooldownService[player][action] = tick() + duration
+end
+
+function CombatService.IsReady(player, action)
+	if not CooldownService[player] then return true end
+	local endTime = CooldownService[player][action]
+	return not endTime or tick() >= endTime
+end
+
+function CombatService.Cleanup(player)
+	CooldownService[player] = nil
+	ActiveAttacks[player] = nil
+end
+
+return CombatService
+]]></ProtectedString>
+					<string name="Name">CombatService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	Combat loader
+]]
+
+local Combat = {
+	HitboxService = require(script.HitboxService),
+	DamageService = require(script.DamageService),
+	StunService = require(script.StunService),
+	IFrameService = require(script.IFrameService),
+	HitstopService = require(script.HitstopService),
+	CombatService = require(script.CombatService),
+}
+
+return Combat
+]]></ProtectedString>
+					<string name="Name">init</string>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Folder">
+			<Properties>
+				<string name="Name">Character</string>
+			</Properties>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	CharacterService.lua
+	Character data management
+]]
+
+local CharacterService = {}
+local Characters = {}
+local PlayerCharacters = {}
+
+function CharacterService.Init()
+	-- Load Arthur data
+	local Arthur = require(script.Parent.Data.Arthur)
+	Characters[Arthur.Name] = Arthur
+	print("[CharacterService] Initialized")
+end
+
+function CharacterService.Get(player)
+	local charName = PlayerCharacters[player] or "Arthur"
+	return Characters[charName]
+end
+
+function CharacterService.SetCharacter(player, charName)
+	if Characters[charName] then
+		PlayerCharacters[player] = charName
+		return true
+	end
+	return false
+end
+
+return CharacterService
+]]></ProtectedString>
+					<string name="Name">CharacterService</string>
+				</Properties>
+			</Item>
+			<Item class="ModuleScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[local Character = {
+	CharacterService = require(script.CharacterService),
+}
+return Character
+]]></ProtectedString>
+					<string name="Name">init</string>
+				</Properties>
+			</Item>
+			<Item class="Folder">
+				<Properties>
+					<string name="Name">Data</string>
+				</Properties>
+				<Item class="ModuleScript">
+					<Properties>
+						<ProtectedString name="Source"><![CDATA[--[[
+	Arthur.lua
+	Character data for Arthur Leywin
+	Location: ReplicatedStorage
+]]
+
+local Arthur = {
+	Name = "Arthur",
+	DisplayName = "Arthur Leywin",
+	Description = "A young swordsman channeling ether and asuran will.",
+	ModelName = "Arthur",
+
+	-- Base stats
+	Stats = {
+		Damage = 1.0,
+		Knockback = 1.0,
+		Speed = 1.0,
+		Health = 100,
+		WalkSpeed = 16,
+		JumpPower = 50,
+	},
+
+	-- Passive ability
+	Passive = {
+		Name = "Ether Resonance",
+		MaxStacks = 8,
+		StacksPerHit = 1,
+		StackDuration = 8,
+		DecayDuration = 8,
+		BuffDuration = 5,
+		Cooldown = 30,
+		BuffDamage = 1.2,
+		BuffSpeed = 1.1,
+		DamagePerStack = 0.03,
+		AttackSpeedPerStack = 0.03,
+	},
+
+	-- M1 combo
+	M1 = {
+		MaxCombo = 4,
+		ComboWindow = 0.50,
+		Hitstun = 0.35,
+		HitboxSize = Vector3.new(4, 4, 5),
+		HitboxOffset = Vector3.new(0, 0, -3),
+		AttackWalkSpeed = 3,
+
+		Hits = {
+			{ startup = 0.10, active = 0.12, recovery = 0.15, damage = 8, knockback = 65, postureDamage = 12 },
+			{ startup = 0.08, active = 0.06, recovery = 0.08, damage = 8, knockback = 65, postureDamage = 12 },
+			{ startup = 0.08, active = 0.08, recovery = 0.10, damage = 10, knockback = 65, postureDamage = 15 },
+			{ startup = 0.08, active = 0.10, recovery = 0.14, damage = 14, knockback = 200, lift = 3, postureDamage = 20 },
+		},
+	},
+
+	-- Uptilt attack
+	Uptilt = {
+		Startup = 0.05,
+		Active = 0.10,
+		Recovery = 0.14,
+		RecoveryOnHit = 0.06,
+		Damage = 12,
+		LaunchVelocity = 22,
+		ForwardPush = 4,
+		Hitstun = 0.28,
+		PostureDamage = 18,
+		HitboxSize = Vector3.new(4, 6, 4),
+		HitboxOffset = Vector3.new(0, 2, -3),
+		MaxComboToUse = 2,
+	},
+
+	-- Dash
+	Dash = {
+		Distance = 16,
+		Duration = 0.12,
+		Cooldown = 0.30,
+		IFrames = 0.07,
+		StaminaCost = 15,
+	},
+
+	-- Block/Deflect
+	Block = {
+		DamageReduction = 0.75,
+		KnockbackReduction = 0.3,
+		StaminaDrain = 12,
+		Pushback = 5,
+		PerfectWindow = 0.18,
+		PerfectStun = 0.35,
+		BreakStun = 1.0,
+		PostureDamageMultiplier = 0.6,
+	},
+
+	-- Awakening
+	Awakening = {
+		Name = "Asura Ascension",
+		Duration = 25,
+		Cooldown = 90,
+		SpeedMultiplier = 1.20,
+		DamageMultiplier = 1.20,
+		M1RangeMultiplier = 1.25,
+	},
+
+	-- Animations
+	Animations = {
+		M1_1 = "rbxassetid://12845340632",
+		M1_2 = "rbxassetid://12845369253",
+		M1_3 = "rbxassetid://12845398367",
+		M1_4 = "rbxassetid://12845456406",
+		Uptilt = "rbxassetid://126734284253680",
+		BlockIdle = "rbxassetid://12927194871",
+		BlockHit = "rbxassetid://0",
+		DashForward = "rbxassetid://11989948466",
+		DashRight = "rbxassetid://11997368950",
+		DashLeft = "rbxassetid://11997366704",
+		DashBack = "rbxassetid://11997364353",
+		HitLight = "rbxassetid://0",
+		HitHeavy = "rbxassetid://0",
+	},
+
+	-- Animation speeds
+	AnimationSpeeds = {
+		M1_1 = 1.35, M1_2 = 1.35, M1_3 = 1.35, M1_4 = 1.35,
+		DashForward = 1.5, DashLeft = 1.5, DashRight = 1.5, DashBack = 1.5,
+		Uptilt = 1.20,
+		BlockIdle = 1.0,
+		HitLight = 0.3,
+		HitHeavy = 1.10,
+	},
+
+	-- Abilities
+	Abilities = { "DragonStep", "EtherSlash", "BurstNova", "StaticEdge" },
+	AwakeningAbilities = { "AsuraStep", "EthericDivide", "DragonNova", "Realmbreaker" },
+
+	-- Ability data
+	AbilityData = {
+		DragonStep = {
+			Cooldown = 4, StaminaCost = 15, Distance = 20, Duration = 0.10,
+			IFrameWindow = 0.06, Damage = 6, Knockback = 6, Stagger = 0.2,
+			HitboxSize = Vector3.new(3, 4, 6), CancelFromM1 = true, CancelWindow = 0.15,
+		},
+		EtherSlash = {
+			Cooldown = 6, StaminaCost = 20, Startup = 0.10, Active = 0.12, Recovery = 0.16,
+			Damage = 12, Knockback = 8, HitboxSize = Vector3.new(8, 4, 6),
+			HitboxOffset = Vector3.new(0, 0, -4), BlockDrain = 30,
+		},
+		BurstNova = {
+			Cooldown = 8, StaminaCost = 25, Startup = 0.10, Active = 0.08, Recovery = 0.18,
+			Damage = 8, PushDistance = 8, Radius = 8,
+		},
+		StaticEdge = {
+			Cooldown = 5, StaminaCost = 10, CounterWindow = 0.35,
+			CounterDamage = 16, CounterKnockback = 10,
+		},
+	},
+}
+
+return Arthur
+]]></ProtectedString>
+						<string name="Name">Arthur</string>
+					</Properties>
+				</Item>
+			</Item>
+		</Item>
+	</Item>
+	<Item class="ServerScriptService">
+		<Properties>
+			<string name="Name">ServerScriptService</string>
+		</Properties>
+		<Item class="Script">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+	Init.server.lua
+	Server initialization with dependency injection
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+print("[Server] Initializing combat system...")
+
+-- Load all modules
+local Utils = require(ReplicatedStorage.Utils)
+local States = require(ReplicatedStorage.States)
+local Combat = require(ReplicatedStorage.Combat)
+local Character = require(ReplicatedStorage.Character)
+local Config = require(ReplicatedStorage.Config)
+
+-- Initialize in correct order with dependencies
+
+-- 1. Utils (no dependencies)
+-- Already loaded
+
+-- 2. Character system
+Character.CharacterService.Init()
+
+-- 3. State system
+States.StateService.Init({
+	Grounded = States.Grounded,
+	Airborne = States.Airborne,
+	Stunned = States.Stunned,
+})
+
+-- 4. Combat services
+Combat.IFrameService.Init()
+Combat.HitstopService.Init()
+Combat.HitboxService.Init()
+
+Combat.StunService.Init({
+	StateService = States.StateService,
+})
+
+Combat.DamageService.Init({
+	StateService = States.StateService,
+})
+
+Combat.CombatService.Init({
+	StateService = States.StateService,
+	HitboxService = Combat.HitboxService,
+	DamageService = Combat.DamageService,
+	StunService = Combat.StunService,
+	IFrameService = Combat.IFrameService,
+	HitstopService = Combat.HitstopService,
+	CharacterService = Character.CharacterService,
+	CombatLockService = nil, -- TODO: implement
+})
+
+-- Create remotes
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+if not Remotes then
+	Remotes = Instance.new("Folder")
+	Remotes.Name = "Remotes"
+	Remotes.Parent = ReplicatedStorage
+end
+
+local REMOTE_NAMES = {
+	"Attack", "Uptilt", "Block", "Dash", "Hit",
+	"State", "Ability", "Notification"
+}
+
+local RemoteEvents = {}
+for _, name in ipairs(REMOTE_NAMES) do
+	local remote = Remotes:FindFirstChild(name)
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = Remotes
+	end
+	RemoteEvents[name] = remote
+end
+
+-- Wire up remotes
+RemoteEvents.Attack.OnServerEvent:Connect(function(player)
+	Combat.CombatService.ProcessM1(player)
+end)
+
+-- Player setup
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		-- Setup state
+		States.StateService.Setup(player)
+
+		-- Setup character defaults
+		local humanoid = character:WaitForChild("Humanoid")
+		humanoid.WalkSpeed = Config.Player.WalkSpeed
+		humanoid.JumpPower = Config.Player.JumpPower
+
+		print("[Server] Setup player:", player.Name)
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	States.StateService.Cleanup(player)
+	Combat.CombatService.Cleanup(player)
+	Combat.IFrameService.Cleanup(player)
+end)
+
+print("[Server] Combat system initialized!")
+]]></ProtectedString>
+				<bool name="Disabled">false</bool>
+				<string name="Name">Init</string>
+			</Properties>
+		</Item>
+	</Item>
+	<Item class="StarterPlayer">
+		<Properties>
+			<string name="Name">StarterPlayer</string>
+		</Properties>
+		<Item class="StarterPlayerScripts">
+			<Properties>
+				<string name="Name">StarterPlayerScripts</string>
+			</Properties>
+			<Item class="LocalScript">
+				<Properties>
+					<ProtectedString name="Source"><![CDATA[--[[
+	Init.client.lua
+	Client initialization
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+
+local Player = Players.LocalPlayer
+
+print("[Client] Initializing...")
+
+-- Wait for remotes
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+if not Remotes then
+	warn("[Client] Remotes not found!")
+	return
+end
+
+-- Load modules
+local States = require(ReplicatedStorage.States)
+
+-- Setup local state
+States.StateService.Setup(Player)
+
+-- Input handling
+local function OnInputBegan(input, gameProcessed)
+	if gameProcessed then return end
+
+	-- M1 Attack
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		Remotes.Attack:FireServer()
+	end
+end
+
+UserInputService.InputBegan:Connect(OnInputBegan)
+
+print("[Client] Initialized!")
+]]></ProtectedString>
+					<bool name="Disabled">false</bool>
+					<string name="Name">Init</string>
+				</Properties>
+			</Item>
+		</Item>
+	</Item>
+</roblox>
